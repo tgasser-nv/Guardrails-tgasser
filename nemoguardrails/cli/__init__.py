@@ -47,9 +47,7 @@ app = typer.Typer()
 app.add_typer(
     eval_cli.app, name="eval", short_help="Evaluation a guardrail configuration."
 )
-app.add_typer(
-    aiperf_app, name="aiperf", short_help="Run, analyze, and compare AIPerf benchmarks"
-)
+app.add_typer(aiperf_app, name="aiperf", short_help="Run AIPerf benchmarks")
 app.pretty_exceptions_enable = False
 
 logging.getLogger().setLevel(logging.WARNING)
