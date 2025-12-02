@@ -368,7 +368,7 @@ def test_discover_langchain_community_llm_providers():
     providers = _discover_langchain_community_llm_providers()
     llm_provider_names = get_llm_provider_names()
 
-    custom_registered_providers = {"trt_llm"}
+    custom_registered_providers = {"trt_llm", "fake"}
     assert set(llm_provider_names) - custom_registered_providers == set(providers.keys()), (
         "it seems that we are registering a provider that is not in the LC community llm provider"
     )
