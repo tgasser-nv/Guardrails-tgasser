@@ -17,24 +17,36 @@ import contextvars
 import importlib.util
 import json
 import logging
-import os.path
+import os
 import re
 import time
+import uuid
 import warnings
 from contextlib import asynccontextmanager
+from datetime import datetime
 from typing import Any, Callable, List, Optional
 
-from fastapi import FastAPI, Request
-from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel, Field, root_validator, validator
-from starlette.responses import StreamingResponse
-from starlette.staticfiles import StaticFiles
+import yaml
+from fastapi import FastAPI, HTTPException, Request  # type: ignore[reportMissingImports]
+from fastapi.middleware.cors import CORSMiddleware  # type: ignore[reportMissingImports]
+from pydantic import BaseModel, Field, ValidationError, root_validator, validator
+from starlette.responses import StreamingResponse  # type: ignore[reportMissingImports]
+from starlette.staticfiles import StaticFiles  # type: ignore[reportMissingImports]
 
 from nemoguardrails import LLMRails, RailsConfig, utils
 from nemoguardrails.rails.llm.options import (
     GenerationLog,
     GenerationOptions,
     GenerationResponse,
+)
+from nemoguardrails.server.api_models import (
+    OpenAIChoice,
+    OpenAICompletionRequest,
+    OpenAICompletionResponse,
+    OpenAIMessage,
+    OpenAIModel,
+    OpenAIModelsResponse,
+    OpenAIUsage,
 )
 from nemoguardrails.server.datastore.datastore import DataStore
 from nemoguardrails.streaming import StreamingHandler
@@ -277,21 +289,128 @@ async def get_rails_configs():
         # And we use the name of the root folder as the id of the config.
         return [{"id": app.single_config_id}]
 
+    rails_config_path = app.rails_config_path
+    if not rails_config_path or not os.path.exists(rails_config_path):
+        return []
+
     # We extract all folder names as config names
     config_ids = [
         f
-        for f in os.listdir(app.rails_config_path)
-        if os.path.isdir(os.path.join(app.rails_config_path, f))
+        for f in os.listdir(rails_config_path)
+        if os.path.isdir(os.path.join(rails_config_path, f))
         and f[0] != "."
         and f[0] != "_"
         # We filter out all the configs for which there is no `config.yml` file.
         and (
-            os.path.exists(os.path.join(app.rails_config_path, f, "config.yml"))
-            or os.path.exists(os.path.join(app.rails_config_path, f, "config.yaml"))
+            os.path.exists(os.path.join(rails_config_path, f, "config.yml"))
+            or os.path.exists(os.path.join(rails_config_path, f, "config.yaml"))
         )
     ]
 
     return [{"id": config_id} for config_id in config_ids]
+
+
+@app.get(
+    "/v1/models",
+    response_model=OpenAIModelsResponse,
+    summary="List available models (OpenAI-compatible).",
+)
+async def get_openai_models():
+    """Returns a list of available models in OpenAI-compatible format.
+
+    Only returns models with type='main' from each config's config.yml file.
+    The model ID is the 'model' field value from the main model configuration.
+    """
+    models = []
+    base_timestamp = int(datetime.now().timestamp())
+    seen_model_ids = set()
+
+    # Get rails_config_path and validate it
+    rails_config_path_raw = app.rails_config_path
+    if not rails_config_path_raw:
+        return OpenAIModelsResponse(
+            data=[
+                OpenAIModel(
+                    id="default",
+                    created=base_timestamp,
+                    owned_by="nvidia",
+                    guardrails_config=None,
+                )
+            ]
+        )
+    # Type assertion: rails_config_path is guaranteed to be a non-empty string after the check
+    assert isinstance(rails_config_path_raw, str) and rails_config_path_raw
+    rails_config_path: str = rails_config_path_raw
+
+    # Get all available configs
+    if app.single_config_mode:
+        if app.single_config_id is None:
+            return OpenAIModelsResponse(data=[])
+        assert app.single_config_id is not None
+        config_ids: List[str] = [app.single_config_id]
+    else:
+        config_ids = [
+            f
+            for f in os.listdir(rails_config_path)
+            if os.path.isdir(os.path.join(rails_config_path, f))
+            and f[0] != "."
+            and f[0] != "_"
+            and (
+                os.path.exists(os.path.join(rails_config_path, f, "config.yml"))
+                or os.path.exists(os.path.join(rails_config_path, f, "config.yaml"))
+            )
+        ]
+
+    # Extract main models from each config
+
+    for config_id in config_ids:
+        try:
+            # Load the config YAML file directly
+            config_path = os.path.join(rails_config_path, config_id, "config.yml")
+            if not os.path.exists(config_path):
+                config_path = os.path.join(rails_config_path, config_id, "config.yaml")
+
+            if not os.path.exists(config_path):
+                continue
+
+            with open(config_path, "r", encoding="utf-8") as f:
+                config_data = yaml.safe_load(f)
+
+            # Find the main model
+            if "models" in config_data and isinstance(config_data["models"], list):
+                for model_config in config_data["models"]:
+                    if isinstance(model_config, dict) and model_config.get("type") == "main":
+                        # Get the model field value
+                        model_id = model_config.get("model")
+                        if model_id:
+                            # Check if we've seen this model_id before
+                            # If so, we still add it but with the config_id to show it's available in multiple configs
+                            # For now, we'll add each occurrence with its config_id
+                            models.append(
+                                OpenAIModel(
+                                    id=model_id,
+                                    created=base_timestamp,
+                                    owned_by="nvidia",
+                                    guardrails_config=config_id,
+                                )
+                            )
+                        break  # Only take the first main model
+        except Exception as ex:
+            log.warning(f"Could not load config {config_id} for models endpoint: {ex}")
+            continue
+
+    # If no models found, return a default model
+    if not models:
+        models.append(
+            OpenAIModel(
+                id="default",
+                created=base_timestamp,
+                owned_by="nvidia",
+                guardrails_config=None,
+            )
+        )
+
+    return OpenAIModelsResponse(data=models)
 
 
 # One instance of LLMRails per config id
@@ -357,17 +476,296 @@ def _get_rails(config_ids: List[str]) -> LLMRails:
 
 @app.post(
     "/v1/chat/completions",
-    response_model=ResponseBody,
     response_model_exclude_none=True,
 )
-async def chat_completion(body: RequestBody, request: Request):
-    """Chat completion for the provided conversation.
+async def chat_completion(request: Request):
+    """Chat completion endpoint supporting both Guardrails and OpenAI-compatible formats.
 
-    TODO: add support for explicit state object.
+    If the request contains a 'model' field, it's treated as an OpenAI-compatible request.
+    Otherwise, it's treated as a Guardrails request with config_id/config_ids.
     """
+    # Parse the request body
+    body_data = await request.json()
+
+    # Check if this is an OpenAI-compatible request (has 'model' field)
+    # If 'model' is present, treat as OpenAI format even if 'messages' is missing
+    # (will fail validation with proper error)
+    is_openai_format = "model" in body_data
+
+    if is_openai_format:
+        # Handle OpenAI-compatible request
+        return await _handle_openai_completion(body_data, request)
+    else:
+        # Handle Guardrails request format
+        try:
+            return await _handle_guardrails_completion(body_data, request)
+        except GuardrailsConfigurationError as e:
+            # Convert GuardrailsConfigurationError to HTTP error
+            raise HTTPException(status_code=500, detail=str(e))
+
+
+async def _handle_openai_completion(body_data: dict, request: Request):
+    """Handle OpenAI-compatible chat completion request."""
+    try:
+        openai_request = OpenAICompletionRequest(**body_data)
+    except ValidationError as e:
+        # Pydantic validation errors should return 422
+        raise HTTPException(status_code=422, detail=f"Validation error: {str(e)}")
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Invalid request format: {str(e)}")
+
+    log.info("Got OpenAI-compatible request for model %s", openai_request.model)
+    for logger in registered_loggers:
+        asyncio.get_event_loop().create_task(logger({"endpoint": "/v1/chat/completions", "body": body_data}))
+
+    # Save the request headers in a context variable.
+    api_request_headers.set(request.headers)
+
+    # Parse model identifier: can be:
+    # 1. "config_id/model_name" - use config_id directly
+    # 2. "config_id" - use config_id directly
+    # 3. "model_name" - find first config with main model matching this name
+    rails_config_path_raw = app.rails_config_path
+    if not rails_config_path_raw:
+        raise HTTPException(status_code=404, detail="Rails configuration path not set")
+    # Type assertion: rails_config_path is guaranteed to be a non-empty string after the check
+    assert isinstance(rails_config_path_raw, str) and rails_config_path_raw
+    rails_config_path: str = rails_config_path_raw
+
+    model_parts = openai_request.model.split("/", 1)
+    if len(model_parts) == 2:
+        # Format: config_id/model_name - use config_id
+        config_id = model_parts[0]
+    else:
+        # Could be config_id or model_name - try to find matching config
+        model_or_config_id = model_parts[0]
+
+        # First, check if it's a direct config_id
+        config_path = os.path.join(rails_config_path, model_or_config_id, "config.yml")
+        if not os.path.exists(config_path):
+            config_path = os.path.join(rails_config_path, model_or_config_id, "config.yaml")
+
+        if os.path.exists(config_path):
+            # It's a config_id
+            config_id = model_or_config_id
+        else:
+            # It's a model_name - find config with matching main model
+            config_id = None
+
+            # Get all available configs
+            if app.single_config_mode:
+                if app.single_config_id is None:
+                    raise HTTPException(status_code=404, detail="Single config mode enabled but no config ID set")
+                assert app.single_config_id is not None
+                config_ids_to_check: List[str] = [app.single_config_id]
+            else:
+                config_ids_to_check = [
+                    f
+                    for f in os.listdir(rails_config_path)
+                    if os.path.isdir(os.path.join(rails_config_path, f))
+                    and f[0] != "."
+                    and f[0] != "_"
+                    and (
+                        os.path.exists(os.path.join(rails_config_path, f, "config.yml"))
+                        or os.path.exists(os.path.join(rails_config_path, f, "config.yaml"))
+                    )
+                ]
+
+            # Find first config with matching main model
+
+            for candidate_config_id in config_ids_to_check:
+                try:
+                    candidate_config_path = os.path.join(rails_config_path, candidate_config_id, "config.yml")
+                    if not os.path.exists(candidate_config_path):
+                        candidate_config_path = os.path.join(rails_config_path, candidate_config_id, "config.yaml")
+
+                    if os.path.exists(candidate_config_path):
+                        with open(candidate_config_path, "r", encoding="utf-8") as f:
+                            config_data = yaml.safe_load(f)
+
+                        if "models" in config_data and isinstance(config_data["models"], list):
+                            for model_config in config_data["models"]:
+                                if isinstance(model_config, dict) and model_config.get("type") == "main":
+                                    if model_config.get("model") == model_or_config_id:
+                                        config_id = candidate_config_id
+                                        break
+
+                    if config_id:
+                        break
+                except Exception:
+                    continue
+
+            if not config_id:
+                raise HTTPException(
+                    status_code=404, detail=f"Model '{model_or_config_id}' not found in any configuration"
+                )
+
+    # Get the rails instance
+    try:
+        llm_rails = _get_rails([config_id])
+    except ValueError as ex:
+        log.exception(ex)
+        raise HTTPException(status_code=404, detail=f"Configuration '{config_id}' not found")
+
+    # Convert OpenAI messages to internal format
+    messages = []
+    for msg in openai_request.messages:
+        messages.append({"role": msg.role, "content": msg.content})
+
+    # Prepare generation options from OpenAI parameters
+    llm_params = {}
+    if openai_request.temperature is not None:
+        llm_params["temperature"] = openai_request.temperature
+    if openai_request.max_tokens is not None:
+        llm_params["max_tokens"] = openai_request.max_tokens
+    if openai_request.top_p is not None:
+        llm_params["top_p"] = openai_request.top_p
+    if openai_request.frequency_penalty is not None:
+        llm_params["frequency_penalty"] = openai_request.frequency_penalty
+    if openai_request.presence_penalty is not None:
+        llm_params["presence_penalty"] = openai_request.presence_penalty
+    if openai_request.stop is not None:
+        llm_params["stop"] = openai_request.stop
+
+    options = GenerationOptions(llm_params=llm_params if llm_params else None)
+
+    try:
+        if openai_request.stream and llm_rails.config.streaming_supported and llm_rails.main_llm_supports_streaming:
+            # For streaming, we need to return OpenAI-compatible SSE format
+            completion_id = f"chatcmpl-{uuid.uuid4().hex[:29]}"
+            created_timestamp = int(datetime.now().timestamp())
+
+            async def openai_stream_generator():
+                streaming_handler = StreamingHandler()
+
+                # Start the generation
+                asyncio.create_task(
+                    llm_rails.generate_async(
+                        messages=messages,
+                        streaming_handler=streaming_handler,
+                        options=options,
+                    )
+                )
+
+                # Convert to OpenAI SSE format
+                async for chunk in streaming_handler:
+                    if chunk is None:
+                        continue
+
+                    # Handle both string chunks and dict chunks from StreamingHandler
+                    if isinstance(chunk, dict):
+                        chunk_text = chunk.get("text", "")
+                        if chunk_text is None or chunk_text == "":
+                            continue
+                    elif isinstance(chunk, str):
+                        chunk_text = chunk
+                    else:
+                        chunk_text = str(chunk)
+
+                    # Format as OpenAI SSE
+                    chunk_data = {
+                        "id": completion_id,
+                        "object": "chat.completion.chunk",
+                        "created": created_timestamp,
+                        "model": openai_request.model,
+                        "choices": [
+                            {
+                                "index": 0,
+                                "delta": {"content": chunk_text},
+                                "finish_reason": None,
+                            }
+                        ],
+                    }
+                    yield f"data: {json.dumps(chunk_data)}\n\n"
+
+                # Send final chunk with finish_reason
+                final_data = {
+                    "id": completion_id,
+                    "object": "chat.completion.chunk",
+                    "created": created_timestamp,
+                    "model": openai_request.model,
+                    "choices": [
+                        {
+                            "index": 0,
+                            "delta": {},
+                            "finish_reason": "stop",
+                        }
+                    ],
+                }
+                yield f"data: {json.dumps(final_data)}\n\n"
+                yield "data: [DONE]\n\n"
+
+            return StreamingResponse(openai_stream_generator(), media_type="text/event-stream")
+        else:
+            # Non-streaming response
+            res = await llm_rails.generate_async(messages=messages, options=options)
+
+            # Extract the response message
+            if isinstance(res, GenerationResponse):
+                if isinstance(res.response, list) and len(res.response) > 0:
+                    bot_message_content = res.response[0]
+                    if isinstance(bot_message_content, str):
+                        content = bot_message_content
+                    elif isinstance(bot_message_content, dict):
+                        content = bot_message_content.get("content", "")
+                    else:
+                        content = str(bot_message_content)
+                else:
+                    content = str(res.response) if isinstance(res.response, str) else ""
+            else:
+                content = str(res.get("content", "")) if isinstance(res, dict) else str(res)
+
+            # Extract token usage if available
+            usage = None
+            if isinstance(res, GenerationResponse) and res.log is not None:
+                stats = getattr(res.log, "stats", None)
+                if stats is not None:
+                    usage = OpenAIUsage(
+                        prompt_tokens=getattr(stats, "llm_calls_total_prompt_tokens", None) or 0,
+                        completion_tokens=getattr(stats, "llm_calls_total_completion_tokens", None) or 0,
+                        total_tokens=getattr(stats, "llm_calls_total_tokens", None) or 0,
+                    )
+
+            # Create OpenAI-compatible response
+            completion_id = f"chatcmpl-{uuid.uuid4().hex[:29]}"
+            created_timestamp = int(datetime.now().timestamp())
+
+            response = OpenAICompletionResponse(
+                id=completion_id,
+                created=created_timestamp,
+                model=openai_request.model,
+                choices=[
+                    OpenAIChoice(
+                        index=0,
+                        message=OpenAIMessage(role="assistant", content=content),
+                        finish_reason="stop",
+                    )
+                ],
+                usage=usage,
+            )
+
+            return response
+
+    except Exception as ex:
+        log.exception(ex)
+        raise HTTPException(status_code=500, detail=f"Internal server error: {str(ex)}")
+
+
+async def _handle_guardrails_completion(body_data: dict, request: Request):
+    """Handle Guardrails chat completion request (original format)."""
+    try:
+        body = RequestBody(**body_data)
+    except ValidationError as e:
+        # Pydantic validation errors should return 422
+        raise HTTPException(status_code=422, detail=f"Validation error: {str(e)}")
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Invalid request format: {str(e)}")
+
     log.info("Got request for config %s", body.config_id)
     for logger in registered_loggers:
-        asyncio.get_event_loop().create_task(logger({"endpoint": "/v1/chat/completions", "body": body.json()}))
+        asyncio.get_event_loop().create_task(
+            logger({"endpoint": "/v1/chat/completions", "body": json.dumps(body_data)})
+        )
 
     # Save the request headers in a context variable.
     api_request_headers.set(request.headers)
@@ -516,8 +914,8 @@ def register_logger(logger: Callable):
 def start_auto_reload_monitoring():
     """Start a thread that monitors the config folder for changes."""
     try:
-        from watchdog.events import FileSystemEventHandler
-        from watchdog.observers import Observer
+        from watchdog.events import FileSystemEventHandler  # type: ignore[reportMissingImports]
+        from watchdog.observers import Observer  # type: ignore[reportMissingImports]
 
         class Handler(FileSystemEventHandler):
             def on_any_event(self, event):

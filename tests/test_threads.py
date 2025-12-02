@@ -26,6 +26,17 @@ api.app.rails_config_path = os.path.join(os.path.dirname(__file__), "test_config
 client = TestClient(api.app)
 
 
+@pytest.fixture(scope="function", autouse=True)
+def set_rails_config_path():
+    """Ensure rails_config_path is set correctly for each test."""
+    api.app.rails_config_path = os.path.join(os.path.dirname(__file__), "test_configs", "simple_server")
+    yield
+    # Reset to default after test
+    api.app.rails_config_path = os.path.normpath(
+        os.path.join(os.path.dirname(__file__), "..", "..", "examples", "bots")
+    )
+
+
 def test_get():
     response = client.get("/v1/rails/configs")
     assert response.status_code == 200
