@@ -27,7 +27,11 @@ from datetime import datetime
 from typing import Any, Callable, List, Optional
 
 import yaml
-from fastapi import FastAPI, HTTPException, Request  # type: ignore[reportMissingImports]
+from fastapi import (  # type: ignore[reportMissingImports]
+    FastAPI,
+    HTTPException,
+    Request,
+)
 from fastapi.middleware.cors import CORSMiddleware  # type: ignore[reportMissingImports]
 from pydantic import BaseModel, Field, ValidationError, root_validator, validator
 from starlette.responses import StreamingResponse  # type: ignore[reportMissingImports]
@@ -504,6 +508,179 @@ async def chat_completion(request: Request):
             raise HTTPException(status_code=500, detail=str(e))
 
 
+def _extract_last_user_message(messages: List[dict]) -> str:
+    """Extract the content from the last user message in the messages list."""
+    for msg in reversed(messages):
+        if isinstance(msg, dict) and msg.get("role") == "user":
+            content = msg.get("content", "")
+            return content if isinstance(content, str) else str(content)
+    return ""
+
+
+async def _handle_openai_echo_completion(
+    openai_request: OpenAICompletionRequest,
+    echo_content: str,
+) -> StreamingResponse | OpenAICompletionResponse:
+    """Handle OpenAI-compatible echo completion request.
+
+    Returns the echo_content as the assistant response, supporting both
+    streaming and non-streaming modes.
+
+    Args:
+        openai_request: The OpenAI completion request object
+        echo_content: The content to echo back as the assistant response
+
+    Returns:
+        StreamingResponse for streaming requests, OpenAICompletionResponse for non-streaming
+    """
+    completion_id = f"chatcmpl-{uuid.uuid4().hex[:29]}"
+    created_timestamp = int(datetime.now().timestamp())
+
+    if openai_request.stream:
+        # Streaming echo response
+        async def echo_stream_generator():
+            # Send echo content as chunks
+            chunk_size = 10  # Send 10 characters at a time for testing
+            for i in range(0, len(echo_content), chunk_size):
+                chunk_text = echo_content[i : i + chunk_size]
+                chunk_data = {
+                    "id": completion_id,
+                    "object": "chat.completion.chunk",
+                    "created": created_timestamp,
+                    "model": openai_request.model,
+                    "choices": [
+                        {
+                            "index": 0,
+                            "delta": {"content": chunk_text},
+                            "finish_reason": None,
+                        }
+                    ],
+                }
+                yield f"data: {json.dumps(chunk_data)}\n\n"
+
+            # Send final chunk
+            final_data = {
+                "id": completion_id,
+                "object": "chat.completion.chunk",
+                "created": created_timestamp,
+                "model": openai_request.model,
+                "choices": [
+                    {
+                        "index": 0,
+                        "delta": {},
+                        "finish_reason": "stop",
+                    }
+                ],
+            }
+            yield f"data: {json.dumps(final_data)}\n\n"
+            yield "data: [DONE]\n\n"
+
+        return StreamingResponse(echo_stream_generator(), media_type="text/event-stream")
+    else:
+        # Non-streaming echo response
+        response = OpenAICompletionResponse(
+            id=completion_id,
+            created=created_timestamp,
+            model=openai_request.model,
+            choices=[
+                OpenAIChoice(
+                    index=0,
+                    message=OpenAIMessage(role="assistant", content=echo_content),
+                    finish_reason="stop",
+                )
+            ],
+            usage=OpenAIUsage(
+                prompt_tokens=0,
+                completion_tokens=0,
+                total_tokens=0,
+            ),
+        )
+        return response
+
+
+async def _handle_openai_streaming_completion(
+    openai_request: OpenAICompletionRequest,
+    llm_rails: LLMRails,
+    messages: List[dict],
+    options: GenerationOptions,
+) -> StreamingResponse:
+    """Handle OpenAI-compatible streaming chat completion request.
+
+    Args:
+        openai_request: The OpenAI completion request object
+        llm_rails: The LLMRails instance to use for generation
+        messages: List of messages in internal format
+        options: Generation options
+
+    Returns:
+        StreamingResponse with OpenAI-compatible SSE format
+    """
+    completion_id = f"chatcmpl-{uuid.uuid4().hex[:29]}"
+    created_timestamp = int(datetime.now().timestamp())
+
+    async def openai_stream_generator():
+        streaming_handler = StreamingHandler()
+
+        # Start the generation
+        asyncio.create_task(
+            llm_rails.generate_async(
+                messages=messages,
+                streaming_handler=streaming_handler,
+                options=options,
+            )
+        )
+
+        # Convert to OpenAI SSE format
+        async for chunk in streaming_handler:
+            if chunk is None:
+                continue
+
+            # Handle both string chunks and dict chunks from StreamingHandler
+            if isinstance(chunk, dict):
+                chunk_text = chunk.get("text", "")
+                if chunk_text is None or chunk_text == "":
+                    continue
+            elif isinstance(chunk, str):
+                chunk_text = chunk
+            else:
+                chunk_text = str(chunk)
+
+            # Format as OpenAI SSE
+            chunk_data = {
+                "id": completion_id,
+                "object": "chat.completion.chunk",
+                "created": created_timestamp,
+                "model": openai_request.model,
+                "choices": [
+                    {
+                        "index": 0,
+                        "delta": {"content": chunk_text},
+                        "finish_reason": None,
+                    }
+                ],
+            }
+            yield f"data: {json.dumps(chunk_data)}\n\n"
+
+        # Send final chunk with finish_reason
+        final_data = {
+            "id": completion_id,
+            "object": "chat.completion.chunk",
+            "created": created_timestamp,
+            "model": openai_request.model,
+            "choices": [
+                {
+                    "index": 0,
+                    "delta": {},
+                    "finish_reason": "stop",
+                }
+            ],
+        }
+        yield f"data: {json.dumps(final_data)}\n\n"
+        yield "data: [DONE]\n\n"
+
+    return StreamingResponse(openai_stream_generator(), media_type="text/event-stream")
+
+
 async def _handle_openai_completion(body_data: dict, request: Request):
     """Handle OpenAI-compatible chat completion request."""
     try:
@@ -514,6 +691,14 @@ async def _handle_openai_completion(body_data: dict, request: Request):
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Invalid request format: {str(e)}")
 
+    # Check for X-Guardrails-Architecture header for echo mode
+    architecture_header = request.headers.get("X-Guardrails-Architecture", "").lower()
+    if architecture_header == "echo":
+        # Extract last user message
+        messages_list = [{"role": msg.role, "content": msg.content} for msg in openai_request.messages]
+        echo_content = _extract_last_user_message(messages_list)
+        return await _handle_openai_echo_completion(openai_request, echo_content)
+
     log.info("Got OpenAI-compatible request for model %s", openai_request.model)
     for logger in registered_loggers:
         asyncio.get_event_loop().create_task(logger({"endpoint": "/v1/chat/completions", "body": body_data}))
@@ -521,10 +706,6 @@ async def _handle_openai_completion(body_data: dict, request: Request):
     # Save the request headers in a context variable.
     api_request_headers.set(request.headers)
 
-    # Parse model identifier: can be:
-    # 1. "config_id/model_name" - use config_id directly
-    # 2. "config_id" - use config_id directly
-    # 3. "model_name" - find first config with main model matching this name
     rails_config_path_raw = app.rails_config_path
     if not rails_config_path_raw:
         raise HTTPException(status_code=404, detail="Rails configuration path not set")
@@ -532,73 +713,10 @@ async def _handle_openai_completion(body_data: dict, request: Request):
     assert isinstance(rails_config_path_raw, str) and rails_config_path_raw
     rails_config_path: str = rails_config_path_raw
 
-    model_parts = openai_request.model.split("/", 1)
-    if len(model_parts) == 2:
-        # Format: config_id/model_name - use config_id
-        config_id = model_parts[0]
-    else:
-        # Could be config_id or model_name - try to find matching config
-        model_or_config_id = model_parts[0]
+    config_ids_to_check = await get_config_ids(rails_config_path)
 
-        # First, check if it's a direct config_id
-        config_path = os.path.join(rails_config_path, model_or_config_id, "config.yml")
-        if not os.path.exists(config_path):
-            config_path = os.path.join(rails_config_path, model_or_config_id, "config.yaml")
-
-        if os.path.exists(config_path):
-            # It's a config_id
-            config_id = model_or_config_id
-        else:
-            # It's a model_name - find config with matching main model
-            config_id = None
-
-            # Get all available configs
-            if app.single_config_mode:
-                if app.single_config_id is None:
-                    raise HTTPException(status_code=404, detail="Single config mode enabled but no config ID set")
-                assert app.single_config_id is not None
-                config_ids_to_check: List[str] = [app.single_config_id]
-            else:
-                config_ids_to_check = [
-                    f
-                    for f in os.listdir(rails_config_path)
-                    if os.path.isdir(os.path.join(rails_config_path, f))
-                    and f[0] != "."
-                    and f[0] != "_"
-                    and (
-                        os.path.exists(os.path.join(rails_config_path, f, "config.yml"))
-                        or os.path.exists(os.path.join(rails_config_path, f, "config.yaml"))
-                    )
-                ]
-
-            # Find first config with matching main model
-
-            for candidate_config_id in config_ids_to_check:
-                try:
-                    candidate_config_path = os.path.join(rails_config_path, candidate_config_id, "config.yml")
-                    if not os.path.exists(candidate_config_path):
-                        candidate_config_path = os.path.join(rails_config_path, candidate_config_id, "config.yaml")
-
-                    if os.path.exists(candidate_config_path):
-                        with open(candidate_config_path, "r", encoding="utf-8") as f:
-                            config_data = yaml.safe_load(f)
-
-                        if "models" in config_data and isinstance(config_data["models"], list):
-                            for model_config in config_data["models"]:
-                                if isinstance(model_config, dict) and model_config.get("type") == "main":
-                                    if model_config.get("model") == model_or_config_id:
-                                        config_id = candidate_config_id
-                                        break
-
-                    if config_id:
-                        break
-                except Exception:
-                    continue
-
-            if not config_id:
-                raise HTTPException(
-                    status_code=404, detail=f"Model '{model_or_config_id}' not found in any configuration"
-                )
+    # Find first config with matching main model
+    config_id = await get_config_id_matching_main_llm(config_ids_to_check, openai_request.model, rails_config_path)
 
     # Get the rails instance
     try:
@@ -631,71 +749,12 @@ async def _handle_openai_completion(body_data: dict, request: Request):
 
     try:
         if openai_request.stream and llm_rails.config.streaming_supported and llm_rails.main_llm_supports_streaming:
-            # For streaming, we need to return OpenAI-compatible SSE format
-            completion_id = f"chatcmpl-{uuid.uuid4().hex[:29]}"
-            created_timestamp = int(datetime.now().timestamp())
-
-            async def openai_stream_generator():
-                streaming_handler = StreamingHandler()
-
-                # Start the generation
-                asyncio.create_task(
-                    llm_rails.generate_async(
-                        messages=messages,
-                        streaming_handler=streaming_handler,
-                        options=options,
-                    )
-                )
-
-                # Convert to OpenAI SSE format
-                async for chunk in streaming_handler:
-                    if chunk is None:
-                        continue
-
-                    # Handle both string chunks and dict chunks from StreamingHandler
-                    if isinstance(chunk, dict):
-                        chunk_text = chunk.get("text", "")
-                        if chunk_text is None or chunk_text == "":
-                            continue
-                    elif isinstance(chunk, str):
-                        chunk_text = chunk
-                    else:
-                        chunk_text = str(chunk)
-
-                    # Format as OpenAI SSE
-                    chunk_data = {
-                        "id": completion_id,
-                        "object": "chat.completion.chunk",
-                        "created": created_timestamp,
-                        "model": openai_request.model,
-                        "choices": [
-                            {
-                                "index": 0,
-                                "delta": {"content": chunk_text},
-                                "finish_reason": None,
-                            }
-                        ],
-                    }
-                    yield f"data: {json.dumps(chunk_data)}\n\n"
-
-                # Send final chunk with finish_reason
-                final_data = {
-                    "id": completion_id,
-                    "object": "chat.completion.chunk",
-                    "created": created_timestamp,
-                    "model": openai_request.model,
-                    "choices": [
-                        {
-                            "index": 0,
-                            "delta": {},
-                            "finish_reason": "stop",
-                        }
-                    ],
-                }
-                yield f"data: {json.dumps(final_data)}\n\n"
-                yield "data: [DONE]\n\n"
-
-            return StreamingResponse(openai_stream_generator(), media_type="text/event-stream")
+            return await _handle_openai_streaming_completion(
+                openai_request=openai_request,
+                llm_rails=llm_rails,
+                messages=messages,
+                options=options,
+            )
         else:
             # Non-streaming response
             res = await llm_rails.generate_async(messages=messages, options=options)
@@ -751,6 +810,87 @@ async def _handle_openai_completion(body_data: dict, request: Request):
         raise HTTPException(status_code=500, detail=f"Internal server error: {str(ex)}")
 
 
+async def get_config_id_matching_main_llm(
+    config_ids_to_check: List[str],
+    model_or_config_id: str,
+    rails_config_path: str,
+) -> str:
+    """Find the config ID that has a main model matching the given model name.
+
+    Args:
+        config_ids_to_check: List of config IDs to search through
+        model_or_config_id: The model name to match against main models
+        rails_config_path: Path to the rails configuration directory
+
+    Returns:
+        The config ID that contains a main model matching model_or_config_id
+
+    Raises:
+        HTTPException: If no matching config is found
+    """
+    for candidate_config_id in config_ids_to_check:
+        try:
+            candidate_config_path = os.path.join(rails_config_path, candidate_config_id, "config.yml")
+            if not os.path.exists(candidate_config_path):
+                candidate_config_path = os.path.join(rails_config_path, candidate_config_id, "config.yaml")
+
+            if os.path.exists(candidate_config_path):
+                with open(candidate_config_path, "r", encoding="utf-8") as f:
+                    config_data = yaml.safe_load(f)
+
+                if "models" in config_data and isinstance(config_data["models"], list):
+                    for model_config in config_data["models"]:
+                        if isinstance(model_config, dict) and model_config.get("type") == "main":
+                            if model_config.get("model") == model_or_config_id:
+                                return candidate_config_id
+        except Exception:
+            continue
+
+    raise HTTPException(
+        status_code=404,
+        detail=f"Model '{model_or_config_id}' not found in any configuration",
+    )
+
+
+async def get_config_ids(rails_config_path: str) -> List[str]:
+    """Get list of available config IDs.
+
+    In single config mode, returns the single config ID.
+    Otherwise, scans the rails_config_path directory for subdirectories
+    containing config.yml or config.yaml files.
+
+    Args:
+        rails_config_path: Path to the rails configuration directory
+
+    Returns:
+        List of config IDs (directory names)
+
+    Raises:
+        HTTPException: If single config mode is enabled but no config ID is set
+    """
+    if app.single_config_mode:
+        if app.single_config_id is None:
+            raise HTTPException(
+                status_code=404,
+                detail="Single config mode enabled but no config ID set",
+            )
+        assert app.single_config_id is not None
+        config_ids_to_check: List[str] = [app.single_config_id]
+    else:
+        config_ids_to_check = [
+            f
+            for f in os.listdir(rails_config_path)
+            if os.path.isdir(os.path.join(rails_config_path, f))
+            and f[0] != "."
+            and f[0] != "_"
+            and (
+                os.path.exists(os.path.join(rails_config_path, f, "config.yml"))
+                or os.path.exists(os.path.join(rails_config_path, f, "config.yaml"))
+            )
+        ]
+    return config_ids_to_check
+
+
 async def _handle_guardrails_completion(body_data: dict, request: Request):
     """Handle Guardrails chat completion request (original format)."""
     try:
@@ -760,6 +900,29 @@ async def _handle_guardrails_completion(body_data: dict, request: Request):
         raise HTTPException(status_code=422, detail=f"Validation error: {str(e)}")
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Invalid request format: {str(e)}")
+
+    # Check for X-Guardrails-Architecture header for echo mode
+    architecture_header = request.headers.get("X-Guardrails-Architecture", "").lower()
+    if architecture_header == "echo":
+        # Extract last user message
+        messages = body.messages or []
+        echo_content = _extract_last_user_message(messages)
+
+        if body.stream:
+            # Streaming echo response
+            async def echo_stream_generator():
+                # Send echo content as chunks
+                chunk_size = 10  # Send 10 characters at a time for testing
+                for i in range(0, len(echo_content), chunk_size):
+                    chunk_text = echo_content[i : i + chunk_size]
+                    yield chunk_text
+                yield ""  # Final empty chunk to signal completion
+
+            return StreamingResponse(echo_stream_generator())
+        else:
+            # Non-streaming echo response
+            bot_message = {"role": "assistant", "content": echo_content}
+            return ResponseBody(messages=[bot_message])
 
     log.info("Got request for config %s", body.config_id)
     for logger in registered_loggers:
@@ -914,7 +1077,9 @@ def register_logger(logger: Callable):
 def start_auto_reload_monitoring():
     """Start a thread that monitors the config folder for changes."""
     try:
-        from watchdog.events import FileSystemEventHandler  # type: ignore[reportMissingImports]
+        from watchdog.events import (
+            FileSystemEventHandler,  # type: ignore[reportMissingImports]
+        )
         from watchdog.observers import Observer  # type: ignore[reportMissingImports]
 
         class Handler(FileSystemEventHandler):
