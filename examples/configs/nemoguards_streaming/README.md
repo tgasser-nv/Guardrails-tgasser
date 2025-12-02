@@ -1,6 +1,7 @@
 # NeMoGuard Safety Rails Example
 
 This example showcases the use of NVIDIA's NeMoGuard NIMs for comprehensive AI safety including content moderation, topic control, and jailbreak detection.
+It is based on the [nemoguards](../nemoguards) configuration, and enables output streaming and checking from the Application LLM.
 
 ## Configuration Files
 
