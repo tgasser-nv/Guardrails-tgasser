@@ -38,6 +38,7 @@ from starlette.responses import StreamingResponse  # type: ignore[reportMissingI
 from starlette.staticfiles import StaticFiles  # type: ignore[reportMissingImports]
 
 from nemoguardrails import LLMRails, RailsConfig, utils
+from nemoguardrails.engines.scheduler_engine import SchedulerEngine
 from nemoguardrails.rails.llm.options import (
     GenerationLog,
     GenerationOptions,
@@ -74,7 +75,7 @@ class GuardrailsApp(FastAPI):
         self.single_config_id: Optional[str] = None
         self.loop: Optional[asyncio.AbstractEventLoop] = None
         self.task: Optional[asyncio.Future] = None
-
+        self.scheduler: Optional[SchedulerEngine] = None
 
 # The list of registered loggers. Can be used to send logs to various
 # backends and storage engines.
@@ -91,6 +92,7 @@ api_request_headers: contextvars.ContextVar = contextvars.ContextVar("headers")
 #  and get rid of all the global attributes.
 datastore: Optional[DataStore] = None
 
+ARCHITECTURES = {}
 
 @asynccontextmanager
 async def lifespan(app: GuardrailsApp):
@@ -126,8 +128,16 @@ async def lifespan(app: GuardrailsApp):
             if config_module is not None and hasattr(config_module, "init"):
                 config_module.init(app)
 
-    # Finally, we register the static frontend UI serving
+    # Load the content-safety config (hard-coded for now)
+    config_path = os.path.abspath(app.rails_config_path)
+    log.info("Loading config from %s", config_path)
+    scheduler_rails_config = RailsConfig.from_path(config_path)
+    scheduler = SchedulerEngine(scheduler_rails_config, num_workers=4)
+    await scheduler.start()
+    app.scheduler = scheduler
 
+
+    # Finally, we register the static frontend UI serving
     if not app.disable_chat_ui:
         FRONTEND_DIR = utils.get_chat_ui_data_path("frontend")
 
@@ -699,6 +709,50 @@ async def _handle_openai_completion(body_data: dict, request: Request):
         echo_content = _extract_last_user_message(messages_list)
         return await _handle_openai_echo_completion(openai_request, echo_content)
 
+    # Convert OpenAI messages to internal format
+    messages = []
+    for msg in openai_request.messages:
+        messages.append({"role": msg.role, "content": msg.content})
+
+    # Prepare generation options from OpenAI parameters
+    llm_params = {}
+    if openai_request.temperature is not None:
+        llm_params["temperature"] = openai_request.temperature
+    if openai_request.max_tokens is not None:
+        llm_params["max_tokens"] = openai_request.max_tokens
+    if openai_request.top_p is not None:
+        llm_params["top_p"] = openai_request.top_p
+    if openai_request.frequency_penalty is not None:
+        llm_params["frequency_penalty"] = openai_request.frequency_penalty
+    if openai_request.presence_penalty is not None:
+        llm_params["presence_penalty"] = openai_request.presence_penalty
+    if openai_request.stop is not None:
+        llm_params["stop"] = openai_request.stop
+
+    options = GenerationOptions(llm_params=llm_params if llm_params else None)
+
+    response = await app.scheduler.generate_async(messages=messages, options=GenerationOptions())
+
+    # Create OpenAI-compatible response
+    completion_id = f"chatcmpl-{uuid.uuid4().hex[:29]}"
+    created_timestamp = int(datetime.now().timestamp())
+
+    response = OpenAICompletionResponse(
+        id=completion_id,
+        created=created_timestamp,
+        model=openai_request.model,
+        choices=[
+            OpenAIChoice(
+                index=0,
+                message=OpenAIMessage(role="assistant", content=response),
+                finish_reason="stop",
+            )
+        ],
+        usage=None,
+    )
+
+    return response
+
     log.info("Got OpenAI-compatible request for model %s", openai_request.model)
     for logger in registered_loggers:
         asyncio.get_event_loop().create_task(logger({"endpoint": "/v1/chat/completions", "body": body_data}))
@@ -725,27 +779,7 @@ async def _handle_openai_completion(body_data: dict, request: Request):
         log.exception(ex)
         raise HTTPException(status_code=404, detail=f"Configuration '{config_id}' not found")
 
-    # Convert OpenAI messages to internal format
-    messages = []
-    for msg in openai_request.messages:
-        messages.append({"role": msg.role, "content": msg.content})
 
-    # Prepare generation options from OpenAI parameters
-    llm_params = {}
-    if openai_request.temperature is not None:
-        llm_params["temperature"] = openai_request.temperature
-    if openai_request.max_tokens is not None:
-        llm_params["max_tokens"] = openai_request.max_tokens
-    if openai_request.top_p is not None:
-        llm_params["top_p"] = openai_request.top_p
-    if openai_request.frequency_penalty is not None:
-        llm_params["frequency_penalty"] = openai_request.frequency_penalty
-    if openai_request.presence_penalty is not None:
-        llm_params["presence_penalty"] = openai_request.presence_penalty
-    if openai_request.stop is not None:
-        llm_params["stop"] = openai_request.stop
-
-    options = GenerationOptions(llm_params=llm_params if llm_params else None)
 
     try:
         if openai_request.stream and llm_rails.config.streaming_supported and llm_rails.main_llm_supports_streaming:
