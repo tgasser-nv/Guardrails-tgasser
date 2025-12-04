@@ -128,7 +128,7 @@ async def lifespan(app: GuardrailsApp):
             if config_module is not None and hasattr(config_module, "init"):
                 config_module.init(app)
 
-    # Load the content-safety config (hard-coded for now)
+    #
     config_path = os.path.abspath(app.rails_config_path)
     log.info("Loading config from %s", config_path)
     scheduler_rails_config = RailsConfig.from_path(config_path)
@@ -161,6 +161,9 @@ async def lifespan(app: GuardrailsApp):
         app.task = app.loop.run_in_executor(None, start_auto_reload_monitoring)
 
     yield
+
+    # Shut down the scheduler
+    await app.scheduler.stop()
 
     # Shutdown logic here
     if app.auto_reload:
@@ -701,59 +704,30 @@ async def _handle_openai_completion(body_data: dict, request: Request):
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Invalid request format: {str(e)}")
 
+    if openai_request.stream:
+        raise HTTPException(status_code=400, detail="Streaming not supported")
+
     # Check for X-Guardrails-Architecture header for echo mode
-    architecture_header = request.headers.get("X-Guardrails-Architecture", "").lower()
+    architecture_header = request.headers.get("X-Guardrails-Architecture")
+    if architecture_header:
+        log.debug("Requested architecture %s", architecture_header)
+
     if architecture_header == "echo":
         # Extract last user message
         messages_list = [{"role": msg.role, "content": msg.content} for msg in openai_request.messages]
         echo_content = _extract_last_user_message(messages_list)
         return await _handle_openai_echo_completion(openai_request, echo_content)
 
-    # Convert OpenAI messages to internal format
-    messages = []
-    for msg in openai_request.messages:
-        messages.append({"role": msg.role, "content": msg.content})
+    messages = await list_of_dict_openai_messages(openai_request)
+    options = await openai_generation_options(openai_request)
 
-    # Prepare generation options from OpenAI parameters
-    llm_params = {}
-    if openai_request.temperature is not None:
-        llm_params["temperature"] = openai_request.temperature
-    if openai_request.max_tokens is not None:
-        llm_params["max_tokens"] = openai_request.max_tokens
-    if openai_request.top_p is not None:
-        llm_params["top_p"] = openai_request.top_p
-    if openai_request.frequency_penalty is not None:
-        llm_params["frequency_penalty"] = openai_request.frequency_penalty
-    if openai_request.presence_penalty is not None:
-        llm_params["presence_penalty"] = openai_request.presence_penalty
-    if openai_request.stop is not None:
-        llm_params["stop"] = openai_request.stop
+    if architecture_header == "scheduler":
+        generation_response = await app.scheduler.generate_async(messages=messages, options=options)
+        response = await _openai_response(openai_request, generation_response)
+        return response
 
-    options = GenerationOptions(llm_params=llm_params if llm_params else None)
 
-    response = await app.scheduler.generate_async(messages=messages, options=GenerationOptions())
-
-    # Create OpenAI-compatible response
-    completion_id = f"chatcmpl-{uuid.uuid4().hex[:29]}"
-    created_timestamp = int(datetime.now().timestamp())
-
-    response = OpenAICompletionResponse(
-        id=completion_id,
-        created=created_timestamp,
-        model=openai_request.model,
-        choices=[
-            OpenAIChoice(
-                index=0,
-                message=OpenAIMessage(role="assistant", content=response),
-                finish_reason="stop",
-            )
-        ],
-        usage=None,
-    )
-
-    return response
-
-    log.info("Got OpenAI-compatible request for model %s", openai_request.model)
+    # log.info("Got OpenAI-compatible request for model %s", openai_request.model)
     for logger in registered_loggers:
         asyncio.get_event_loop().create_task(logger({"endpoint": "/v1/chat/completions", "body": body_data}))
 
@@ -842,6 +816,55 @@ async def _handle_openai_completion(body_data: dict, request: Request):
     except Exception as ex:
         log.exception(ex)
         raise HTTPException(status_code=500, detail=f"Internal server error: {str(ex)}")
+
+
+async def _openai_response(openai_request: OpenAICompletionRequest, generation_response: GenerationResponse) -> OpenAICompletionResponse:
+    # Create OpenAI-compatible response
+    completion_id = f"chatcmpl-{uuid.uuid4().hex[:29]}"
+    created_timestamp = int(datetime.now().timestamp())
+
+    response = OpenAICompletionResponse(
+        id=completion_id,
+        created=created_timestamp,
+        model=openai_request.model,
+        choices=[
+            OpenAIChoice(
+                index=0,
+                message=OpenAIMessage(role="assistant", content=generation_response.response),
+                finish_reason="stop",
+            )
+        ],
+        usage=None,
+    )
+    return response
+
+
+async def openai_generation_options(openai_request: OpenAICompletionRequest) -> GenerationOptions:
+    # Prepare generation options from OpenAI parameters
+    llm_params = {}
+    if openai_request.temperature is not None:
+        llm_params["temperature"] = openai_request.temperature
+    if openai_request.max_tokens is not None:
+        llm_params["max_tokens"] = openai_request.max_tokens
+    if openai_request.top_p is not None:
+        llm_params["top_p"] = openai_request.top_p
+    if openai_request.frequency_penalty is not None:
+        llm_params["frequency_penalty"] = openai_request.frequency_penalty
+    if openai_request.presence_penalty is not None:
+        llm_params["presence_penalty"] = openai_request.presence_penalty
+    if openai_request.stop is not None:
+        llm_params["stop"] = openai_request.stop
+
+    options = GenerationOptions(llm_params=llm_params if llm_params else None)
+    return options
+
+
+async def list_of_dict_openai_messages(openai_request: OpenAICompletionRequest) -> list[Any]:
+    # Convert OpenAI messages to internal format
+    messages = []
+    for msg in openai_request.messages:
+        messages.append({"role": msg.role, "content": msg.content})
+    return messages
 
 
 async def get_config_id_matching_main_llm(
