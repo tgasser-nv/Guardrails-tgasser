@@ -99,8 +99,8 @@ class SchedulerEngine(GuardrailsEngineBase):
         prompt = prompt_template.content.replace("{{ user_input }}", job.messages[-1]["content"])
 
         base_url = None
-        if model.parameters and model.parameters.base_url:
-            base_url = model.parameters.base_url
+        if model.parameters and model.parameters["base_url"]:
+            base_url = model.parameters["base_url"]
         elif model.engine == "nim":
             base_url = "https://integrate.api.nvidia.com"
         elif model.engine == "openai":
@@ -148,8 +148,8 @@ class SchedulerEngine(GuardrailsEngineBase):
         prompt = prompt.replace("{{ bot_response }}", llm_response)
 
         base_url = None
-        if model.parameters and model.parameters.base_url:
-            base_url = model.parameters.base_url
+        if model.parameters and model.parameters["base_url"]:
+            base_url = model.parameters["base_url"]
         elif model.engine == "nim":
             base_url = "https://integrate.api.nvidia.com"
         elif model.engine == "openai":
@@ -172,12 +172,6 @@ class SchedulerEngine(GuardrailsEngineBase):
 
         async with aiohttp.ClientSession(headers=headers) as session:
             async with session.post(url, json=body) as response:
-
-                # 10:47:45 gr.1      | {"User Safety": "safe", "Response Safety": "safe"}
-
-                print(response.status)
-                print(await response.text())
-
                 try:
                     response_dict = await response.json()
                     content_safety_text = response_dict['choices'][0]['message']['content']
@@ -199,8 +193,8 @@ class SchedulerEngine(GuardrailsEngineBase):
         prompt = job.messages
 
         base_url = None
-        if model.parameters and model.parameters.base_url:
-            base_url = model.parameters.base_url
+        if model.parameters and model.parameters["base_url"]:
+            base_url = model.parameters["base_url"]
         elif model.engine == "nim":
             base_url = "https://integrate.api.nvidia.com"
         elif model.engine == "openai":
@@ -236,13 +230,17 @@ class SchedulerEngine(GuardrailsEngineBase):
 
             # asyncio guarantees workers get a unique item from the queue
             job = await self.request_queue.get()
+            log.info("Worker #%d running job %s", worker_id, job)
 
+            log.info("Worker #%d checking content-safety input", worker_id)
             is_input_safe = await self._is_content_safety_input_safe(job)
             if not is_input_safe:
                 return "I'm sorry I can't help you with that"
 
+            log.info("Worker #%d generating response", worker_id)
             app_llm_response = await self._app_llm_response(job)
 
+            log.info("Worker #%d checking content-safety output", worker_id)
             is_output_safe = await self._is_content_safety_output_safe(job, app_llm_response)
             if not is_output_safe:
                 return "I'm sorry I can't help you with that"
