@@ -40,6 +40,7 @@ class BaseConfig(BaseModel):
     )
     api_key_env_var: Optional[str] = Field(default=None, description="API key environment variable")
     streaming: Optional[bool] = Field(default=False, description="Streaming mode")
+    header: Optional[Dict[str, str]] = Field(default=None, description="HTTP headers to add to each request")
 
     # Load generation settings
     warmup_request_count: int = Field(description="Requests to send before beginning performance-test")

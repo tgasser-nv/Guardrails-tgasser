@@ -57,6 +57,8 @@ class TestBaseConfig:
             endpoint="/v1/completions",
             endpoint_type="completions",
             api_key_env_var="AIPERF_API_KEY",
+            streaming=True,
+            header={"Content-Type": "application/json"},
             warmup_request_count=10,
             benchmark_duration=60,
             concurrency=5,
@@ -73,6 +75,8 @@ class TestBaseConfig:
         assert config.endpoint == "/v1/completions"
         assert config.endpoint_type == "completions"
         assert config.api_key_env_var == "AIPERF_API_KEY"
+        assert config.streaming
+        assert config.header == {"Content-Type": "application/json"}
         assert config.request_rate == 2.5
         assert config.request_rate_mode == "poisson"
         assert config.random_seed == 42

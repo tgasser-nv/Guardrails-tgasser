@@ -188,6 +188,14 @@ class AIPerfRunner:
                 # For list values, add multiple arguments
                 for item in value:
                     cmd.extend([f"--{arg_name}", str(item)])
+            elif isinstance(value, dict):
+                # Provide dicts as a string representation
+                try:
+                    item_string = json.dumps(value)
+                except TypeError as e:
+                    log.error("Unable to serialize value to JSON: %s", e)
+                    raise
+                cmd.extend([f"--{arg_name}", item_string])
             elif value is not None:
                 cmd.extend([f"--{arg_name}", str(value)])
 

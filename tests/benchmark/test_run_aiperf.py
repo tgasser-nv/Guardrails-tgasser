@@ -521,6 +521,39 @@ class TestBuildCommand:
             assert value1_idx > 0
             assert value2_idx > 0
 
+    def test_build_command_with_single_header(self, create_config_file, tmp_path):
+        """Test building command with streaming enabled"""
+        header = {"Content-Type": "application/json"}
+        config_file = create_config_file(extra_base_config={"header": header})
+
+        runner = AIPerfRunner(config_file)
+        output_dir = tmp_path / "output"
+        cmd = runner._build_command(None, output_dir)
+
+        assert "--header" in cmd
+        header_idx = cmd.index("--header")
+        header_dict_idx = header_idx + 1
+        header_arg = json.loads(cmd[header_dict_idx])
+        assert header_arg == header
+
+
+    def test_build_command_with_many_headers(self, create_config_file, tmp_path):
+        """Test building command with streaming enabled"""
+        headers = {"Content-Type": "application/json",
+                   "OpenAI-Project": "proj-abc"}
+
+        config_file = create_config_file(extra_base_config={"header": headers})
+
+        runner = AIPerfRunner(config_file)
+        output_dir = tmp_path / "output"
+        cmd = runner._build_command(None, output_dir)
+
+        assert "--header" in cmd
+        header_idx = cmd.index("--header")
+        header_arg_idx = header_idx + 1
+        header_arg = json.loads(cmd[header_arg_idx])
+        assert header_arg == headers
+
 
 class TestCreateOutputDir:
     """Test the _create_output_dir static method."""
