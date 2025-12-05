@@ -132,7 +132,7 @@ async def lifespan(app: GuardrailsApp):
     config_path = os.path.abspath(app.rails_config_path)
     log.info("Loading config from %s", config_path)
     scheduler_rails_config = RailsConfig.from_path(config_path)
-    scheduler = SchedulerEngine(scheduler_rails_config, num_workers=4)
+    scheduler = SchedulerEngine(scheduler_rails_config, num_workers=256)
     await scheduler.start()
     app.scheduler = scheduler
 
@@ -830,7 +830,7 @@ async def _openai_response(openai_request: OpenAICompletionRequest, generation_r
         choices=[
             OpenAIChoice(
                 index=0,
-                message=OpenAIMessage(role="assistant", content=generation_response.response),
+                message=OpenAIMessage(role="assistant", content=str(generation_response.response)),
                 finish_reason="stop",
             )
         ],
