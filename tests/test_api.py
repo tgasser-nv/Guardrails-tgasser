@@ -784,7 +784,7 @@ class TestOpenAIChatCompletionsEndpoint:
         assert data["choices"][0]["message"]["content"] == user_message
         assert data["choices"][0]["message"]["role"] == "assistant"
 
-    def test_openai_completion_echo_mode_streaming(self):
+    def test_openai_completion_echo_mode_doesnt_support_streaming(self):
         """Test that X-Guardrails-Architecture: echo works with streaming."""
         api.app.rails_config_path = os.path.normpath(
             os.path.join(os.path.dirname(__file__), "test_configs", "simple_server")
@@ -800,26 +800,8 @@ class TestOpenAIChatCompletionsEndpoint:
             },
             headers={"X-Guardrails-Architecture": "echo"},
         )
-        assert response.status_code == 200
-        assert response.headers.get("content-type") == "text/event-stream; charset=utf-8"
-
-        # Read streaming response
-        content = ""
-        for line in response.iter_lines():
-            if line.startswith("data: "):
-                data_str = line[6:]
-                if data_str == "[DONE]":
-                    break
-                try:
-                    chunk_data = json.loads(data_str)
-                    if "choices" in chunk_data and len(chunk_data["choices"]) > 0:
-                        delta = chunk_data["choices"][0].get("delta", {})
-                        if "content" in delta:
-                            content += delta["content"]
-                except json.JSONDecodeError:
-                    pass
-
-        assert content == user_message
+        assert response.status_code == 422
+        assert "Streaming not supported in echo mode" in response.json()['detail']
 
     def test_openai_completion_echo_mode_multiple_messages(self):
         """Test that echo mode returns the last user message when multiple messages exist."""
