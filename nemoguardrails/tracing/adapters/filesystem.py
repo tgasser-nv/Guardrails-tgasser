@@ -60,7 +60,7 @@ class FileSystemAdapter(InteractionLogAdapter):
 
     async def transform_async(self, interaction_log: "InteractionLog"):
         try:
-            import aiofiles
+            import aiofiles  # type: ignore[reportMissingModuleSource]
         except ImportError:
             raise ImportError(
                 "aiofiles is required for async file writing. Please install it using `pip install aiofiles`"

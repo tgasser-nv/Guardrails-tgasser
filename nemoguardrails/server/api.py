@@ -706,7 +706,7 @@ async def _handle_openai_completion(body_data: dict, request: Request):
         raise HTTPException(status_code=400, detail=f"Invalid request format: {str(e)}")
 
     if openai_request.stream:
-        raise HTTPException(status_code=400, detail="Streaming not supported")
+        raise HTTPException(status_code=422, detail="Streaming not supported")
 
     # Check for X-Guardrails-Architecture header for echo mode
     architecture_header = request.headers.get("X-Guardrails-Architecture")
@@ -723,6 +723,9 @@ async def _handle_openai_completion(body_data: dict, request: Request):
     options = await openai_generation_options(openai_request)
 
     if architecture_header == "async_worker_pool":
+        if not app.scheduler or not isinstance(app.scheduler, AsyncWorkerPoolEngine):
+            raise HTTPException(status_code=422, detail=f"Scheduler {architecture_header} not supported")
+
         generation_response = await app.scheduler.generate_async(messages=messages, options=options)
         response = await _openai_response(openai_request, generation_response)
         return response
