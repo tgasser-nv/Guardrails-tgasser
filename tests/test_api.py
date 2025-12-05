@@ -801,7 +801,7 @@ class TestOpenAIChatCompletionsEndpoint:
             headers={"X-Guardrails-Architecture": "echo"},
         )
         assert response.status_code == 422
-        assert "Streaming not supported in echo mode" in response.json()['detail']
+        assert "Streaming not supported in echo mode" in response.json()["detail"]
 
     def test_openai_completion_echo_mode_multiple_messages(self):
         """Test that echo mode returns the last user message when multiple messages exist."""

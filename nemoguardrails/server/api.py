@@ -708,13 +708,15 @@ async def _handle_openai_completion(body_data: dict, request: Request):
     # Check for X-Guardrails-Architecture header for echo mode
     architecture_header = request.headers.get("X-Guardrails-Architecture")
     architecture_header = architecture_header.lower() if architecture_header else None
-    
+
     if architecture_header:
         log.debug("Requested architecture %s", architecture_header)
 
     if architecture_header == "echo":
         if openai_request.stream:
-            raise HTTPException(status_code=422, detail=f"Streaming not supported in echo mode for request: {openai_request}")
+            raise HTTPException(
+                status_code=422, detail=f"Streaming not supported in echo mode for request: {openai_request}"
+            )
         # Extract last user message
         messages_list = [{"role": msg.role, "content": msg.content} for msg in openai_request.messages]
         echo_content = _extract_last_user_message(messages_list)
@@ -728,7 +730,10 @@ async def _handle_openai_completion(body_data: dict, request: Request):
             raise HTTPException(status_code=422, detail=f"Scheduler {architecture_header} not supported")
 
         if openai_request.stream:
-            raise HTTPException(status_code=422, detail=f"AsyncWorkerPool engine doesn't support streaming for request: {openai_request}")
+            raise HTTPException(
+                status_code=422,
+                detail=f"AsyncWorkerPool engine doesn't support streaming for request: {openai_request}",
+            )
 
         generation_response = await app.scheduler.generate_async(messages=messages, options=options)
         response = await _openai_response(openai_request, generation_response)
