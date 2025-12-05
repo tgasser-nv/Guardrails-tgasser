@@ -13,3 +13,24 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import asyncio
+from dataclasses import dataclass, field
+
+from nemoguardrails.rails.llm.options import GenerationOptions
+
+
+@dataclass
+class AsyncWorkerPoolEngineJob:
+    """Dataclass in which to store incoming work items"""
+
+    job_id: str
+    queue_timestamp: int
+    future: asyncio.Future
+
+    # Use default_factory for mutable types (lists/dicts)
+    messages: list[dict] = field(default_factory=list)
+
+    # Optional fields default to None
+    options: GenerationOptions | None = None
+    work_timestamp: int | None = None
+    completed_timestamp: int | None = None

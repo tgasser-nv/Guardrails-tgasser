@@ -1,3 +1,18 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 import asyncio
 import json
 import logging
@@ -10,8 +25,8 @@ import aiohttp
 from fastapi import HTTPException
 
 from nemoguardrails import RailsConfig
+from nemoguardrails.engines.async_worker_pool_engine_models import AsyncWorkerPoolEngineJob
 from nemoguardrails.engines.guardrails_engine_base import GuardrailsEngineBase
-from nemoguardrails.engines.scheduler_engine_models import SchedulerEngineJob
 from nemoguardrails.rails.llm.config import Model
 from nemoguardrails.rails.llm.options import GenerationOptions, GenerationResponse
 from nemoguardrails.streaming import StreamingHandler
@@ -21,9 +36,7 @@ MAX_QUEUE_SIZE = 1000
 log = logging.getLogger(__name__)
 log.setLevel(logging.INFO)
 
-formatter = logging.Formatter(
-    "%(asctime)s %(levelname)s: %(message)s", datefmt="%Y-%m-%d %H:%M:%S"
-)
+formatter = logging.Formatter("%(asctime)s %(levelname)s: %(message)s", datefmt="%Y-%m-%d %H:%M:%S")
 console_handler = logging.StreamHandler()
 console_handler.setLevel(logging.DEBUG)
 console_handler.setFormatter(formatter)
@@ -31,8 +44,10 @@ console_handler.setFormatter(formatter)
 log.addHandler(console_handler)
 
 
-class SchedulerEngine(GuardrailsEngineBase):
-    """Workflow engine using a synchronous scheduler to allocate work to async-based API requesters"""
+class AsyncWorkerPoolEngine(GuardrailsEngineBase):
+    """Workflow engine using an asynchronous queue and pool of workers.
+    Implements hard-coded Content-safety input and output rails
+    """
 
     def __init__(self, rails_config: RailsConfig, num_workers: int) -> None:
         """Create a new scheduler engine"""
@@ -68,14 +83,10 @@ class SchedulerEngine(GuardrailsEngineBase):
     async def _get_model_by_type(self, model_type: str) -> Model:
         """Returns a single model whose type matches the given type"""
 
-        matching_models = [
-            model for model in self.models.values() if model.type == model_type
-        ]
+        matching_models = [model for model in self.models.values() if model.type == model_type]
         num_models = len(matching_models)
         if num_models != 1:
-            raise Exception(
-                f"Expected one model with type {model_type}, got {num_models}: {matching_models}"
-            )
+            raise Exception(f"Expected one model with type {model_type}, got {num_models}: {matching_models}")
         return matching_models[0]
 
     async def _get_content_safety_model(self) -> Model:
@@ -86,18 +97,14 @@ class SchedulerEngine(GuardrailsEngineBase):
         """Return the Model used for content safety"""
         return await self._get_model_by_type("main")
 
-    async def _is_content_safety_input_safe(self, job: SchedulerEngineJob) -> bool:
+    async def _is_content_safety_input_safe(self, job: AsyncWorkerPoolEngineJob) -> bool:
         """Make an input-rail content-safety request
 
         Example: https://build.nvidia.com/nvidia/llama-3_1-nemoguard-8b-content-safety?snippet_tab=Shell
         """
         model = await self._get_content_safety_model()
-        prompt_template = self.prompts[
-            "content_safety_check_input $model=content_safety"
-        ]
-        prompt = prompt_template.content.replace(
-            "{{ user_input }}", job.messages[-1]["content"]
-        )
+        prompt_template = self.prompts["content_safety_check_input $model=content_safety"]
+        prompt = prompt_template.content.replace("{{ user_input }}", job.messages[-1]["content"])
 
         base_url = None
         if model.parameters and model.parameters["base_url"]:
@@ -125,39 +132,28 @@ class SchedulerEngine(GuardrailsEngineBase):
 
         async with aiohttp.ClientSession(headers=headers) as session:
             async with session.post(url, json=body) as response:
-
                 # 10:47:45 gr.1      | {"User Safety": "safe", "Response Safety": "safe"}
 
                 try:
                     response_dict = await response.json()
-                    content_safety_text = response_dict["choices"][0]["message"][
-                        "content"
-                    ]
+                    content_safety_text = response_dict["choices"][0]["message"]["content"]
                     content_safety_response = json.loads(content_safety_text)
 
-                    is_request_safe = (
-                        content_safety_response.get("User Safety", "unsafe") == "safe"
-                    )
+                    is_request_safe = content_safety_response.get("User Safety", "unsafe") == "safe"
                     return is_request_safe
 
                 except Exception as e:
                     raise HTTPException(status_code=404, detail=str(e))
 
-    async def _is_content_safety_output_safe(
-        self, job: SchedulerEngineJob, llm_response: str
-    ) -> bool:
+    async def _is_content_safety_output_safe(self, job: AsyncWorkerPoolEngineJob, llm_response: str) -> bool:
         """Make an output-rail content-safety request
 
         Example: https://build.nvidia.com/nvidia/llama-3_1-nemoguard-8b-content-safety?snippet_tab=Shell
         """
 
         model = await self._get_content_safety_model()
-        prompt_template = self.prompts[
-            "content_safety_check_output $model=content_safety"
-        ]
-        prompt = prompt_template.content.replace(
-            "{{ user_input }}", job.messages[-1]["content"]
-        )
+        prompt_template = self.prompts["content_safety_check_output $model=content_safety"]
+        prompt = prompt_template.content.replace("{{ user_input }}", job.messages[-1]["content"])
         prompt = prompt.replace("{{ bot_response }}", llm_response)
 
         base_url = None
@@ -189,24 +185,17 @@ class SchedulerEngine(GuardrailsEngineBase):
             async with session.post(url, json=body) as response:
                 try:
                     response_dict = await response.json()
-                    content_safety_text = response_dict["choices"][0]["message"][
-                        "content"
-                    ]
+                    content_safety_text = response_dict["choices"][0]["message"]["content"]
                     content_safety_response = json.loads(content_safety_text)
 
-                    is_request_safe = (
-                        content_safety_response.get("User Safety", "unsafe") == "safe"
-                    )
-                    is_response_safe = (
-                        content_safety_response.get("Response Safety", "unsafe")
-                        == "safe"
-                    )
+                    is_request_safe = content_safety_response.get("User Safety", "unsafe") == "safe"
+                    is_response_safe = content_safety_response.get("Response Safety", "unsafe") == "safe"
                     return is_request_safe and is_response_safe
 
                 except Exception as e:
                     raise HTTPException(status_code=404, detail=str(e))
 
-    async def _app_llm_response(self, job: SchedulerEngineJob) -> str:
+    async def _app_llm_response(self, job: AsyncWorkerPoolEngineJob) -> str:
         """Generate a response from the application LLM)
 
         Example: https://build.nvidia.com/nvidia/llama-3_1-nemoguard-8b-content-safety?snippet_tab=Shell
@@ -239,7 +228,6 @@ class SchedulerEngine(GuardrailsEngineBase):
 
         async with aiohttp.ClientSession(headers=headers) as session:
             async with session.post(url, json=body) as response:
-
                 try:
                     response_dict = await response.json()
                     content_text = response_dict["choices"][0]["message"]["content"]
@@ -250,7 +238,6 @@ class SchedulerEngine(GuardrailsEngineBase):
 
     async def _worker_loop(self, worker_id: int):
         while True:
-
             # asyncio guarantees workers get a unique item from the queue
             job = await self.request_queue.get()
             log.info("Worker #%d running job %s", worker_id, job)
@@ -259,9 +246,7 @@ class SchedulerEngine(GuardrailsEngineBase):
                 log.info("Worker #%d checking content-safety input", worker_id)
                 is_input_safe = await self._is_content_safety_input_safe(job)
                 if not is_input_safe:
-                    generation_response = GenerationResponse(
-                        response="I'm sorry I can't help you with that"
-                    )
+                    generation_response = GenerationResponse(response="I'm sorry I can't help you with that")
                     job.future.set_result(generation_response)
                     continue
 
@@ -269,13 +254,9 @@ class SchedulerEngine(GuardrailsEngineBase):
                 app_llm_response = await self._app_llm_response(job)
 
                 log.info("Worker #%d checking content-safety output", worker_id)
-                is_output_safe = await self._is_content_safety_output_safe(
-                    job, app_llm_response
-                )
+                is_output_safe = await self._is_content_safety_output_safe(job, app_llm_response)
                 if not is_output_safe:
-                    generation_response = GenerationResponse(
-                        response="I'm sorry I can't help you with that"
-                    )
+                    generation_response = GenerationResponse(response="I'm sorry I can't help you with that")
                     job.future.set_result(generation_response)
                     continue
 
@@ -302,11 +283,11 @@ class SchedulerEngine(GuardrailsEngineBase):
 
         loop = asyncio.get_event_loop()
         future = loop.create_future()
-        request_time = time.time()
-        job_id = uuid.uuid4()
+        request_time = int(time.time())
+        job_id = str(uuid.uuid4())
 
         # Create a new job. The `work_timestamp` and `completed_timestamp` are None since it's only queued
-        job = SchedulerEngineJob(
+        job = AsyncWorkerPoolEngineJob(
             job_id=job_id,
             messages=messages,
             options=options,

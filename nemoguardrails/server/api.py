@@ -38,7 +38,7 @@ from starlette.responses import StreamingResponse  # type: ignore[reportMissingI
 from starlette.staticfiles import StaticFiles  # type: ignore[reportMissingImports]
 
 from nemoguardrails import LLMRails, RailsConfig, utils
-from nemoguardrails.engines.scheduler_engine import SchedulerEngine
+from nemoguardrails.engines.async_worker_pool_engine import AsyncWorkerPoolEngine
 from nemoguardrails.rails.llm.options import (
     GenerationLog,
     GenerationOptions,
@@ -75,7 +75,8 @@ class GuardrailsApp(FastAPI):
         self.single_config_id: Optional[str] = None
         self.loop: Optional[asyncio.AbstractEventLoop] = None
         self.task: Optional[asyncio.Future] = None
-        self.scheduler: Optional[SchedulerEngine] = None
+        self.scheduler: Optional[AsyncWorkerPoolEngine] = None
+
 
 # The list of registered loggers. Can be used to send logs to various
 # backends and storage engines.
@@ -93,6 +94,7 @@ api_request_headers: contextvars.ContextVar = contextvars.ContextVar("headers")
 datastore: Optional[DataStore] = None
 
 ARCHITECTURES = {}
+
 
 @asynccontextmanager
 async def lifespan(app: GuardrailsApp):
@@ -132,10 +134,9 @@ async def lifespan(app: GuardrailsApp):
     config_path = os.path.abspath(app.rails_config_path)
     log.info("Loading config from %s", config_path)
     scheduler_rails_config = RailsConfig.from_path(config_path)
-    scheduler = SchedulerEngine(scheduler_rails_config, num_workers=256)
+    scheduler = AsyncWorkerPoolEngine(scheduler_rails_config, num_workers=256)
     await scheduler.start()
     app.scheduler = scheduler
-
 
     # Finally, we register the static frontend UI serving
     if not app.disable_chat_ui:
@@ -721,11 +722,10 @@ async def _handle_openai_completion(body_data: dict, request: Request):
     messages = await list_of_dict_openai_messages(openai_request)
     options = await openai_generation_options(openai_request)
 
-    if architecture_header == "scheduler":
+    if architecture_header == "async_worker_pool":
         generation_response = await app.scheduler.generate_async(messages=messages, options=options)
         response = await _openai_response(openai_request, generation_response)
         return response
-
 
     # log.info("Got OpenAI-compatible request for model %s", openai_request.model)
     for logger in registered_loggers:
@@ -752,8 +752,6 @@ async def _handle_openai_completion(body_data: dict, request: Request):
     except ValueError as ex:
         log.exception(ex)
         raise HTTPException(status_code=404, detail=f"Configuration '{config_id}' not found")
-
-
 
     try:
         if openai_request.stream and llm_rails.config.streaming_supported and llm_rails.main_llm_supports_streaming:
@@ -818,7 +816,9 @@ async def _handle_openai_completion(body_data: dict, request: Request):
         raise HTTPException(status_code=500, detail=f"Internal server error: {str(ex)}")
 
 
-async def _openai_response(openai_request: OpenAICompletionRequest, generation_response: GenerationResponse) -> OpenAICompletionResponse:
+async def _openai_response(
+    openai_request: OpenAICompletionRequest, generation_response: GenerationResponse
+) -> OpenAICompletionResponse:
     # Create OpenAI-compatible response
     completion_id = f"chatcmpl-{uuid.uuid4().hex[:29]}"
     created_timestamp = int(datetime.now().timestamp())
