@@ -536,11 +536,9 @@ class TestBuildCommand:
         header_arg = json.loads(cmd[header_dict_idx])
         assert header_arg == header
 
-
     def test_build_command_with_many_headers(self, create_config_file, tmp_path):
         """Test building command with streaming enabled"""
-        headers = {"Content-Type": "application/json",
-                   "OpenAI-Project": "proj-abc"}
+        headers = {"Content-Type": "application/json", "OpenAI-Project": "proj-abc"}
 
         config_file = create_config_file(extra_base_config={"header": headers})
 

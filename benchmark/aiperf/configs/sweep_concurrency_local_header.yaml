@@ -1,10 +1,10 @@
-# Single-run AIPerf benchmark configuration
+# Concurrency sweep. One-minute tests at log-spaced concurrencies
 
 # Name for this batch of benchmarks (will be part of output directory name)
-batch_name: single_concurrency
+batch_name: sweep_concurrency
 
 # Base directory where all benchmark results will be stored.
-# Actual name is <output_base_dir>/<batch_name>/<sweep value>
+# Actual name is <output_base_dir>/<batch_name>/<sweep value> for sweeps
 output_base_dir: aiperf_results
 
 # Base configuration applied to all benchmark runs
@@ -17,12 +17,12 @@ base_config:
   endpoint: "/v1/chat/completions"
   endpoint_type: chat
   header:
-    X-Guardrails-Architecture: "echo"
+    X-Guardrails-Architecture: "async_worker_pool"
 
   # Load generation settings.
-  warmup_request_count: 20
-  benchmark_duration: 60
-  concurrency: 1
+  warmup_request_count: 10
+  benchmark_duration: 120
+  concurrency: 0  # Overridden by the concurrency sweep below
   request_rate_mode: "constant"
 
   # Synthetic data generation
@@ -31,3 +31,9 @@ base_config:
   prompt_input_tokens_stddev: 10
   prompt_output_tokens_mean: 50
   prompt_output_tokens_stddev: 5
+
+# Parameter sweeps. Each parameter can have multiple values
+# The script will run all combinations (Cartesian product)
+sweeps:
+  # Sweep over the following concurrency values
+  concurrency: [1, 2, 4, 8, 16, 32, 64, 128, 256]
