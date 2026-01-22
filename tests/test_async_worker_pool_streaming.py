@@ -511,6 +511,131 @@ class TestAsyncWorkerPoolEngineStreaming:
         # Safety check should have been called for final buffer
         assert safety_check_called
 
+    @pytest.mark.asyncio
+    async def test_stream_first_parallel_safety_checks(self, worker_pool_engine):
+        """Test that with stream_first enabled, chunks are sent while safety checks run in parallel."""
+        # Enable stream_first
+        worker_pool_engine.rails_config.rails.output.streaming.stream_first = True
+
+        streaming_handler = StreamingHandler()
+        future = asyncio.Future()
+
+        job = AsyncWorkerPoolEngineJob(
+            job_id="test-123",
+            queue_timestamp=123456,
+            future=future,
+            messages=[{"role": "user", "content": "Hello"}],
+            streaming_handler=streaming_handler,
+        )
+
+        # Mock enough chunks to trigger safety check
+        mock_chunks = [f"chunk{i}" for i in range(10)]
+
+        async def mock_streaming():
+            for chunk in mock_chunks:
+                yield chunk
+
+        safety_check_call_count = 0
+
+        async def mock_safety_check(_job, _response):
+            nonlocal safety_check_call_count
+            safety_check_call_count += 1
+            # Add small delay to simulate async behavior
+            await asyncio.sleep(0.01)
+            return True  # Always safe
+
+        with patch.object(
+            worker_pool_engine, "_is_content_safety_input_safe", return_value=True
+        ), patch.object(
+            worker_pool_engine,
+            "_app_llm_response_streaming",
+            return_value=mock_streaming(),
+        ), patch.object(
+            worker_pool_engine,
+            "_is_content_safety_output_safe",
+            side_effect=mock_safety_check,
+        ):
+            await worker_pool_engine._process_streaming_job(0, job)
+
+        # Collect chunks
+        chunks = []
+        try:
+            async for chunk in streaming_handler:
+                if chunk is not None:
+                    if isinstance(chunk, dict):
+                        chunks.append(chunk.get("text", ""))
+                    else:
+                        chunks.append(chunk)
+        except StopAsyncIteration:
+            pass
+
+        # Should have received all chunks immediately
+        assert len(chunks) >= len(mock_chunks)
+        # Safety checks should have been called
+        assert safety_check_call_count >= 1
+
+    @pytest.mark.asyncio
+    async def test_stream_first_terminates_on_unsafe(self, worker_pool_engine):
+        """Test that with stream_first enabled, stream terminates when safety check fails."""
+        # Enable stream_first
+        worker_pool_engine.rails_config.rails.output.streaming.stream_first = True
+
+        streaming_handler = StreamingHandler()
+        future = asyncio.Future()
+
+        job = AsyncWorkerPoolEngineJob(
+            job_id="test-123",
+            queue_timestamp=123456,
+            future=future,
+            messages=[{"role": "user", "content": "Hello"}],
+            streaming_handler=streaming_handler,
+        )
+
+        # Mock many chunks
+        mock_chunks = [f"chunk{i}" for i in range(20)]
+
+        async def mock_streaming():
+            for chunk in mock_chunks:
+                yield chunk
+
+        call_count = 0
+
+        async def mock_safety_check(_job, _response):
+            nonlocal call_count
+            call_count += 1
+            # Fail on second safety check
+            if call_count == 2:
+                return False
+            return True
+
+        with patch.object(
+            worker_pool_engine, "_is_content_safety_input_safe", return_value=True
+        ), patch.object(
+            worker_pool_engine,
+            "_app_llm_response_streaming",
+            return_value=mock_streaming(),
+        ), patch.object(
+            worker_pool_engine,
+            "_is_content_safety_output_safe",
+            side_effect=mock_safety_check,
+        ):
+            await worker_pool_engine._process_streaming_job(0, job)
+
+        # Collect chunks
+        chunks = []
+        try:
+            async for chunk in streaming_handler:
+                if chunk is not None:
+                    if isinstance(chunk, dict):
+                        chunks.append(chunk.get("text", ""))
+                    else:
+                        chunks.append(chunk)
+        except StopAsyncIteration:
+            pass
+
+        # Should have received error message
+        assert any("Content filtered" in str(chunk) for chunk in chunks)
+
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

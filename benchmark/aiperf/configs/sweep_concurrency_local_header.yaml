@@ -18,6 +18,7 @@ base_config:
   endpoint_type: chat
   header:
     X-Guardrails-Architecture: "async_worker_pool"
+  streaming: true
 
   # Load generation settings.
   warmup_request_count: 10

@@ -43,7 +43,9 @@ DEFAULT_CHUNK_WINDOW_SIZE = int(os.environ.get("GUARDRAILS_CHUNK_WINDOW_SIZE", "
 log = logging.getLogger(__name__)
 log.setLevel(logging.INFO)
 
-formatter = logging.Formatter("%(asctime)s %(levelname)s: %(message)s", datefmt="%Y-%m-%d %H:%M:%S")
+formatter = logging.Formatter(
+    "%(asctime)s %(levelname)s: %(message)s", datefmt="%Y-%m-%d %H:%M:%S"
+)
 console_handler = logging.StreamHandler()
 console_handler.setLevel(logging.DEBUG)
 console_handler.setFormatter(formatter)
@@ -104,10 +106,14 @@ class AsyncWorkerPoolEngine(GuardrailsEngineBase):
     async def _get_model_by_type(self, model_type: str) -> Model:
         """Returns a single model whose type matches the given type"""
 
-        matching_models = [model for model in self.models.values() if model.type == model_type]
+        matching_models = [
+            model for model in self.models.values() if model.type == model_type
+        ]
         num_models = len(matching_models)
         if num_models != 1:
-            raise Exception(f"Expected one model with type {model_type}, got {num_models}: {matching_models}")
+            raise Exception(
+                f"Expected one model with type {model_type}, got {num_models}: {matching_models}"
+            )
         return matching_models[0]
 
     async def _get_content_safety_model(self) -> Model:
@@ -118,16 +124,22 @@ class AsyncWorkerPoolEngine(GuardrailsEngineBase):
         """Return the Model used for content safety"""
         return await self._get_model_by_type("main")
 
-    async def _is_content_safety_input_safe(self, job: AsyncWorkerPoolEngineJob) -> bool:
+    async def _is_content_safety_input_safe(
+        self, job: AsyncWorkerPoolEngineJob
+    ) -> bool:
         """Make an input-rail content-safety request
 
         Example: https://build.nvidia.com/nvidia/llama-3_1-nemoguard-8b-content-safety?snippet_tab=Shell
         """
         model = await self._get_content_safety_model()
-        prompt_template = self.prompts["content_safety_check_input $model=content_safety"]
+        prompt_template = self.prompts[
+            "content_safety_check_input $model=content_safety"
+        ]
         if prompt_template.content is None:
             raise ValueError("Prompt template content is None")
-        prompt = prompt_template.content.replace("{{ user_input }}", job.messages[-1]["content"])
+        prompt = prompt_template.content.replace(
+            "{{ user_input }}", job.messages[-1]["content"]
+        )
 
         base_url = None
         if model.parameters and model.parameters["base_url"]:
@@ -159,26 +171,36 @@ class AsyncWorkerPoolEngine(GuardrailsEngineBase):
 
                 try:
                     response_dict = await response.json()
-                    content_safety_text = response_dict["choices"][0]["message"]["content"]
+                    content_safety_text = response_dict["choices"][0]["message"][
+                        "content"
+                    ]
                     content_safety_response = json.loads(content_safety_text)
 
-                    is_request_safe = content_safety_response.get("User Safety", "unsafe") == "safe"
+                    is_request_safe = (
+                        content_safety_response.get("User Safety", "unsafe") == "safe"
+                    )
                     return is_request_safe
 
                 except Exception as e:
                     raise HTTPException(status_code=404, detail=str(e))
 
-    async def _is_content_safety_output_safe(self, job: AsyncWorkerPoolEngineJob, llm_response: str) -> bool:
+    async def _is_content_safety_output_safe(
+        self, job: AsyncWorkerPoolEngineJob, llm_response: str
+    ) -> bool:
         """Make an output-rail content-safety request
 
         Example: https://build.nvidia.com/nvidia/llama-3_1-nemoguard-8b-content-safety?snippet_tab=Shell
         """
 
         model = await self._get_content_safety_model()
-        prompt_template = self.prompts["content_safety_check_output $model=content_safety"]
+        prompt_template = self.prompts[
+            "content_safety_check_output $model=content_safety"
+        ]
         if prompt_template.content is None:
             raise ValueError("Prompt template content is None")
-        prompt = prompt_template.content.replace("{{ user_input }}", job.messages[-1]["content"])
+        prompt = prompt_template.content.replace(
+            "{{ user_input }}", job.messages[-1]["content"]
+        )
         prompt = prompt.replace("{{ bot_response }}", llm_response)
 
         base_url = None
@@ -210,11 +232,18 @@ class AsyncWorkerPoolEngine(GuardrailsEngineBase):
             async with session.post(url, json=body) as response:
                 try:
                     response_dict = await response.json()
-                    content_safety_text = response_dict["choices"][0]["message"]["content"]
+                    content_safety_text = response_dict["choices"][0]["message"][
+                        "content"
+                    ]
                     content_safety_response = json.loads(content_safety_text)
 
-                    is_request_safe = content_safety_response.get("User Safety", "unsafe") == "safe"
-                    is_response_safe = content_safety_response.get("Response Safety", "unsafe") == "safe"
+                    is_request_safe = (
+                        content_safety_response.get("User Safety", "unsafe") == "safe"
+                    )
+                    is_response_safe = (
+                        content_safety_response.get("Response Safety", "unsafe")
+                        == "safe"
+                    )
                     return is_request_safe and is_response_safe
 
                 except Exception as e:
@@ -261,7 +290,9 @@ class AsyncWorkerPoolEngine(GuardrailsEngineBase):
                 except Exception as e:
                     raise HTTPException(status_code=404, detail=str(e))
 
-    async def _app_llm_response_streaming(self, job: AsyncWorkerPoolEngineJob) -> AsyncIterator[str]:
+    async def _app_llm_response_streaming(
+        self, job: AsyncWorkerPoolEngineJob
+    ) -> AsyncIterator[str]:
         """Generate a streaming response from the application LLM (yields chunks)
 
         Yields:
@@ -337,7 +368,9 @@ class AsyncWorkerPoolEngine(GuardrailsEngineBase):
 
             self.request_queue.task_done()
 
-    async def _process_non_streaming_job(self, worker_id: int, job: AsyncWorkerPoolEngineJob):
+    async def _process_non_streaming_job(
+        self, worker_id: int, job: AsyncWorkerPoolEngineJob
+    ):
         """Process a non-streaming job"""
         log.info("Worker #%d running job %s", worker_id, job)
 
@@ -345,7 +378,9 @@ class AsyncWorkerPoolEngine(GuardrailsEngineBase):
             log.info("Worker #%d checking content-safety input", worker_id)
             is_input_safe = await self._is_content_safety_input_safe(job)
             if not is_input_safe:
-                generation_response = GenerationResponse(response="I'm sorry I can't help you with that")
+                generation_response = GenerationResponse(
+                    response="I'm sorry I can't help you with that"
+                )
                 job.future.set_result(generation_response)
                 return
 
@@ -353,9 +388,13 @@ class AsyncWorkerPoolEngine(GuardrailsEngineBase):
             app_llm_response = await self._app_llm_response(job)
 
             log.info("Worker #%d checking content-safety output", worker_id)
-            is_output_safe = await self._is_content_safety_output_safe(job, app_llm_response)
+            is_output_safe = await self._is_content_safety_output_safe(
+                job, app_llm_response
+            )
             if not is_output_safe:
-                generation_response = GenerationResponse(response="I'm sorry I can't help you with that")
+                generation_response = GenerationResponse(
+                    response="I'm sorry I can't help you with that"
+                )
                 job.future.set_result(generation_response)
                 return
 
@@ -366,14 +405,17 @@ class AsyncWorkerPoolEngine(GuardrailsEngineBase):
             log.exception("Worker #%d encountered an error %s", worker_id, e)
             job.future.set_exception(e)
 
-    async def _process_streaming_job(self, worker_id: int, job: AsyncWorkerPoolEngineJob):
+    async def _process_streaming_job(
+        self, worker_id: int, job: AsyncWorkerPoolEngineJob
+    ):
         """Process a streaming job with buffered content safety checks
 
         This method:
         1. Checks content safety of the input
         2. Streams the LLM response while buffering chunks
         3. Performs content safety checks on windows of N chunks
-        4. Stops streaming and returns error message if any window fails safety check
+        4. If stream_first is enabled, chunks are forwarded immediately while safety checks run in parallel
+        5. Stops streaming and returns error message if any window fails safety check
         """
         log.info("Worker #%d running streaming job %s", worker_id, job)
 
@@ -381,9 +423,19 @@ class AsyncWorkerPoolEngine(GuardrailsEngineBase):
 
         # Type guard to ensure streaming_handler is not None
         if streaming_handler is None:
-            log.error("Worker #%d: streaming_handler is None for streaming job", worker_id)
-            job.future.set_exception(ValueError("Streaming handler is required for streaming jobs"))
+            log.error(
+                "Worker #%d: streaming_handler is None for streaming job", worker_id
+            )
+            job.future.set_exception(
+                ValueError("Streaming handler is required for streaming jobs")
+            )
             return
+
+        # Check if stream_first is enabled
+        stream_first = (
+            self.rails_config.rails.output.streaming
+            and self.rails_config.rails.output.streaming.stream_first
+        )
 
         try:
             # Step 1: Check content safety of input
@@ -391,24 +443,32 @@ class AsyncWorkerPoolEngine(GuardrailsEngineBase):
             is_input_safe = await self._is_content_safety_input_safe(job)
             if not is_input_safe:
                 # Push error message and end stream
-                await streaming_handler.push_chunk("I'm sorry I can't help you with that")
+                await streaming_handler.push_chunk(
+                    "I'm sorry I can't help you with that"
+                )
                 await streaming_handler.push_chunk(END_OF_STREAM)  # type: ignore
                 job.future.set_result(None)
                 return
 
             # Step 2 & 3: Stream LLM response with buffered content safety checks
             log.info(
-                "Worker #%d generating streaming response with buffered safety checks",
+                "Worker #%d generating streaming response with buffered safety checks (stream_first=%s)",
                 worker_id,
+                stream_first,
             )
 
             chunk_buffer = []
             full_response = ""
             safety_check_failed = False
+            pending_safety_check = None  # Track running safety check task
 
             async for chunk in self._app_llm_response_streaming(job):
-                # Return all the chunks immediately if stream_first is enabled
-                if self.rails_config.rails.output.streaming.stream_first:
+                # If a previous safety check failed, stop streaming
+                if safety_check_failed:
+                    break
+
+                # If stream_first is enabled, send chunks immediately
+                if stream_first:
                     await streaming_handler.push_chunk(chunk)
 
                 # Add chunk to buffer
@@ -427,30 +487,71 @@ class AsyncWorkerPoolEngine(GuardrailsEngineBase):
                         len(buffered_text),
                     )
 
-                    # Perform content safety check on the accumulated buffer
-                    is_output_safe = await self._is_content_safety_output_safe(job, full_response)
+                    if stream_first:
+                        # Wait for any previous safety check to complete before starting a new one
+                        if pending_safety_check is not None:
+                            is_previous_safe = await pending_safety_check
+                            if not is_previous_safe:
+                                log.warning(
+                                    "Worker #%d: Output failed content safety check at %d total chars",
+                                    worker_id,
+                                    len(full_response),
+                                )
+                                safety_check_failed = True
+                                # Send error message and stop
+                                await streaming_handler.push_chunk(
+                                    "\n\n[Content filtered: Response violated safety guidelines]"
+                                )
+                                await streaming_handler.push_chunk(END_OF_STREAM)  # type: ignore
+                                job.future.set_result(None)
+                                return
 
-                    if not is_output_safe:
-                        log.warning(
-                            "Worker #%d: Output failed content safety check at %d total chars",
-                            worker_id,
-                            len(full_response),
+                        # Start safety check in parallel (don't await)
+                        pending_safety_check = asyncio.create_task(
+                            self._is_content_safety_output_safe(job, full_response)
                         )
-                        safety_check_failed = True
-                        # Stop streaming and send error message
-                        await streaming_handler.push_chunk(
-                            "\n\n[Content filtered: Response violated safety guidelines]"
+                    else:
+                        # Non-stream_first mode: perform safety check synchronously
+                        is_output_safe = await self._is_content_safety_output_safe(
+                            job, full_response
                         )
-                        await streaming_handler.push_chunk(END_OF_STREAM)  # type: ignore
-                        job.future.set_result(None)
-                        return
 
-                    # Safety check passed, push all buffered chunks to the streaming handler
-                    for buffered_chunk in chunk_buffer:
-                        await streaming_handler.push_chunk(buffered_chunk)
+                        if not is_output_safe:
+                            log.warning(
+                                "Worker #%d: Output failed content safety check at %d total chars",
+                                worker_id,
+                                len(full_response),
+                            )
+                            safety_check_failed = True
+                            # Stop streaming and send error message
+                            await streaming_handler.push_chunk(
+                                "\n\n[Content filtered: Response violated safety guidelines]"
+                            )
+                            await streaming_handler.push_chunk(END_OF_STREAM)  # type: ignore
+                            job.future.set_result(None)
+                            return
+
+                        # Safety check passed, push all buffered chunks to the streaming handler
+                        for buffered_chunk in chunk_buffer:
+                            await streaming_handler.push_chunk(buffered_chunk)
 
                     # Clear the buffer
                     chunk_buffer = []
+
+            # Wait for any pending safety check to complete
+            if pending_safety_check is not None:
+                is_final_check_safe = await pending_safety_check
+                if not is_final_check_safe:
+                    log.warning(
+                        "Worker #%d: Output failed content safety check (pending check)",
+                        worker_id,
+                    )
+                    await streaming_handler.push_chunk(
+                        "\n\n[Content filtered: Response violated safety guidelines]"
+                    )
+                    await streaming_handler.push_chunk(END_OF_STREAM)  # type: ignore
+                    job.future.set_result(None)
+                    return
 
             # Handle any remaining chunks in the buffer after streaming completes
             if chunk_buffer and not safety_check_failed:
@@ -461,7 +562,9 @@ class AsyncWorkerPoolEngine(GuardrailsEngineBase):
                     len(chunk_buffer),
                 )
 
-                is_output_safe = await self._is_content_safety_output_safe(job, full_response)
+                is_output_safe = await self._is_content_safety_output_safe(
+                    job, full_response
+                )
 
                 if not is_output_safe:
                     log.warning(
@@ -469,14 +572,24 @@ class AsyncWorkerPoolEngine(GuardrailsEngineBase):
                         worker_id,
                     )
                     # Don't send the remaining buffer, just send error and end
-                    await streaming_handler.push_chunk("\n\n[Content filtered: Response violated safety guidelines]")
+                    if stream_first:
+                        # In stream_first mode, chunks were already sent, just add error message
+                        await streaming_handler.push_chunk(
+                            "\n\n[Content filtered: Response violated safety guidelines]"
+                        )
+                    else:
+                        # In non-stream_first mode, don't send remaining buffer
+                        await streaming_handler.push_chunk(
+                            "\n\n[Content filtered: Response violated safety guidelines]"
+                        )
                     await streaming_handler.push_chunk(END_OF_STREAM)  # type: ignore
                     job.future.set_result(None)
                     return
 
-                # Safety check passed, push remaining buffered chunks
-                for buffered_chunk in chunk_buffer:
-                    await streaming_handler.push_chunk(buffered_chunk)
+                # Safety check passed, push remaining buffered chunks (only if not stream_first)
+                if not stream_first:
+                    for buffered_chunk in chunk_buffer:
+                        await streaming_handler.push_chunk(buffered_chunk)
 
             # Signal end of stream
             await streaming_handler.push_chunk(END_OF_STREAM)  # type: ignore
@@ -551,7 +664,9 @@ class AsyncWorkerPoolEngine(GuardrailsEngineBase):
         if messages is None:
             raise ValueError("messages parameter is required for stream_async")
 
-        streaming_handler = StreamingHandler(include_generation_metadata=include_generation_metadata)
+        streaming_handler = StreamingHandler(
+            include_generation_metadata=include_generation_metadata
+        )
 
         # Create a properly managed task with exception handling
         async def _generation_task():
