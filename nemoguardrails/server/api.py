@@ -134,6 +134,7 @@ async def lifespan(app: GuardrailsApp):
     config_path = os.path.abspath(app.rails_config_path)
     log.info("Loading config from %s", config_path)
     scheduler_rails_config = RailsConfig.from_path(config_path)
+
     scheduler = AsyncWorkerPoolEngine(scheduler_rails_config, num_workers=256)
     await scheduler.start()
     app.scheduler = scheduler
@@ -715,7 +716,8 @@ async def _handle_openai_completion(body_data: dict, request: Request):
     if architecture_header == "echo":
         if openai_request.stream:
             raise HTTPException(
-                status_code=422, detail=f"Streaming not supported in echo mode for request: {openai_request}"
+                status_code=422,
+                detail=f"Streaming not supported in echo mode for request: {openai_request}",
             )
         # Extract last user message
         messages_list = [{"role": msg.role, "content": msg.content} for msg in openai_request.messages]
@@ -730,10 +732,83 @@ async def _handle_openai_completion(body_data: dict, request: Request):
             raise HTTPException(status_code=422, detail=f"Scheduler {architecture_header} not supported")
 
         if openai_request.stream:
-            raise HTTPException(
-                status_code=422,
-                detail=f"AsyncWorkerPool engine doesn't support streaming for request: {openai_request}",
-            )
+            # Use streaming with AsyncWorkerPoolEngine
+            completion_id = f"chatcmpl-{uuid.uuid4().hex[:29]}"
+            created_timestamp = int(datetime.now().timestamp())
+
+            # Type assertion: app.scheduler is guaranteed to be AsyncWorkerPoolEngine after the check above
+            scheduler = app.scheduler
+            assert scheduler is not None
+
+            async def generate_stream():
+                try:
+                    async for chunk in scheduler.stream_async(messages=messages, options=options):
+                        if chunk is None:
+                            continue
+
+                        # Handle both string chunks and dict chunks from StreamingHandler
+                        if isinstance(chunk, dict):
+                            chunk_text = chunk.get("text", "")
+                            if chunk_text is None or chunk_text == "":
+                                continue
+                        elif isinstance(chunk, str):
+                            chunk_text = chunk
+                        else:
+                            chunk_text = str(chunk)
+
+                        # Format as OpenAI SSE
+                        chunk_data = {
+                            "id": completion_id,
+                            "object": "chat.completion.chunk",
+                            "created": created_timestamp,
+                            "model": openai_request.model,
+                            "choices": [
+                                {
+                                    "index": 0,
+                                    "delta": {"content": chunk_text},
+                                    "finish_reason": None,
+                                }
+                            ],
+                        }
+                        yield f"data: {json.dumps(chunk_data)}\n\n"
+
+                    # Send final chunk with finish_reason
+                    final_data = {
+                        "id": completion_id,
+                        "object": "chat.completion.chunk",
+                        "created": created_timestamp,
+                        "model": openai_request.model,
+                        "choices": [
+                            {
+                                "index": 0,
+                                "delta": {},
+                                "finish_reason": "stop",
+                            }
+                        ],
+                    }
+                    yield f"data: {json.dumps(final_data)}\n\n"
+                    yield "data: [DONE]\n\n"
+
+                except Exception as e:
+                    log.exception("Error in streaming generation: %s", e)
+                    # Send error chunk
+                    error_data = {
+                        "id": completion_id,
+                        "object": "chat.completion.chunk",
+                        "created": created_timestamp,
+                        "model": openai_request.model,
+                        "choices": [
+                            {
+                                "index": 0,
+                                "delta": {"content": f"Error: {str(e)}"},
+                                "finish_reason": "error",
+                            }
+                        ],
+                    }
+                    yield f"data: {json.dumps(error_data)}\n\n"
+                    yield "data: [DONE]\n\n"
+
+            return StreamingResponse(generate_stream(), media_type="text/event-stream")
 
         generation_response = await app.scheduler.generate_async(messages=messages, options=options)
         response = await _openai_response(openai_request, generation_response)
@@ -851,7 +926,9 @@ async def _openai_response(
     return response
 
 
-async def openai_generation_options(openai_request: OpenAICompletionRequest) -> GenerationOptions:
+async def openai_generation_options(
+    openai_request: OpenAICompletionRequest,
+) -> GenerationOptions:
     # Prepare generation options from OpenAI parameters
     llm_params = {}
     if openai_request.temperature is not None:
@@ -871,7 +948,9 @@ async def openai_generation_options(openai_request: OpenAICompletionRequest) -> 
     return options
 
 
-async def list_of_dict_openai_messages(openai_request: OpenAICompletionRequest) -> list[Any]:
+async def list_of_dict_openai_messages(
+    openai_request: OpenAICompletionRequest,
+) -> list[Any]:
     # Convert OpenAI messages to internal format
     messages = []
     for msg in openai_request.messages:

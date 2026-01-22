@@ -17,6 +17,7 @@ import asyncio
 from dataclasses import dataclass, field
 
 from nemoguardrails.rails.llm.options import GenerationOptions
+from nemoguardrails.streaming import StreamingHandler
 
 
 @dataclass
@@ -34,3 +35,4 @@ class AsyncWorkerPoolEngineJob:
     options: GenerationOptions | None = None
     work_timestamp: int | None = None
     completed_timestamp: int | None = None
+    streaming_handler: StreamingHandler | None = None
