@@ -108,9 +108,9 @@ async def lifespan(app: GuardrailsApp):
 
     # If there is a `config.yml` in the root `app.rails_config_path`, then
     # that means we are in single config mode.
-    if os.path.exists(os.path.join(app.rails_config_path, "config.yml")) or os.path.exists(
-        os.path.join(app.rails_config_path, "config.yaml")
-    ):
+    if os.path.exists(
+        os.path.join(app.rails_config_path, "config.yml")
+    ) or os.path.exists(os.path.join(app.rails_config_path, "config.yaml")):
         app.single_config_mode = True
         app.single_config_id = os.path.basename(app.rails_config_path)
     else:
@@ -264,11 +264,15 @@ class RequestBody(BaseModel):
     def ensure_config_id(cls, data: Any) -> Any:
         if isinstance(data, dict):
             if data.get("config_id") is not None and data.get("config_ids") is not None:
-                raise ValueError("Only one of config_id or config_ids should be specified")
+                raise ValueError(
+                    "Only one of config_id or config_ids should be specified"
+                )
             if data.get("config_id") is None and data.get("config_ids") is not None:
                 data["config_id"] = None
             if data.get("config_id") is None and data.get("config_ids") is None:
-                warnings.warn("No config_id or config_ids provided, using default config_id")
+                warnings.warn(
+                    "No config_id or config_ids provided, using default config_id"
+                )
         return data
 
     @validator("config_ids", pre=True, always=True)
@@ -280,7 +284,9 @@ class RequestBody(BaseModel):
 
 
 class ResponseBody(BaseModel):
-    messages: Optional[List[dict]] = Field(default=None, description="The new messages in the conversation")
+    messages: Optional[List[dict]] = Field(
+        default=None, description="The new messages in the conversation"
+    )
     llm_output: Optional[dict] = Field(
         default=None,
         description="Contains any additional output coming from the LLM.",
@@ -289,7 +295,9 @@ class ResponseBody(BaseModel):
         default=None,
         description="The output data, i.e. a dict with the values corresponding to the `output_vars`.",
     )
-    log: Optional[GenerationLog] = Field(default=None, description="Additional logging information.")
+    log: Optional[GenerationLog] = Field(
+        default=None, description="Additional logging information."
+    )
     state: Optional[dict] = Field(
         default=None,
         description="A state object that should be used to continue the interaction in the future.",
@@ -398,7 +406,10 @@ async def get_openai_models():
             # Find the main model
             if "models" in config_data and isinstance(config_data["models"], list):
                 for model_config in config_data["models"]:
-                    if isinstance(model_config, dict) and model_config.get("type") == "main":
+                    if (
+                        isinstance(model_config, dict)
+                        and model_config.get("type") == "main"
+                    ):
                         # Get the model field value
                         model_id = model_config.get("model")
                         if model_id:
@@ -488,7 +499,9 @@ def _get_rails(config_ids: List[str]) -> LLMRails:
     llm_rails_instances[configs_cache_key] = llm_rails
 
     # If we have a cache for the events, we restore it
-    llm_rails.events_history_cache = llm_rails_events_history_cache.get(configs_cache_key, {})
+    llm_rails.events_history_cache = llm_rails_events_history_cache.get(
+        configs_cache_key, {}
+    )
 
     return llm_rails
 
@@ -590,7 +603,9 @@ async def _handle_openai_echo_completion(
             yield f"data: {json.dumps(final_data)}\n\n"
             yield "data: [DONE]\n\n"
 
-        return StreamingResponse(echo_stream_generator(), media_type="text/event-stream")
+        return StreamingResponse(
+            echo_stream_generator(), media_type="text/event-stream"
+        )
     else:
         # Non-streaming echo response
         response = OpenAICompletionResponse(
@@ -720,7 +735,10 @@ async def _handle_openai_completion(body_data: dict, request: Request):
                 detail=f"Streaming not supported in echo mode for request: {openai_request}",
             )
         # Extract last user message
-        messages_list = [{"role": msg.role, "content": msg.content} for msg in openai_request.messages]
+        messages_list = [
+            {"role": msg.role, "content": msg.content}
+            for msg in openai_request.messages
+        ]
         echo_content = _extract_last_user_message(messages_list)
         return await _handle_openai_echo_completion(openai_request, echo_content)
 
@@ -729,7 +747,9 @@ async def _handle_openai_completion(body_data: dict, request: Request):
 
     if architecture_header == "async_worker_pool":
         if not app.scheduler or not isinstance(app.scheduler, AsyncWorkerPoolEngine):
-            raise HTTPException(status_code=422, detail=f"Scheduler {architecture_header} not supported")
+            raise HTTPException(
+                status_code=422, detail=f"Scheduler {architecture_header} not supported"
+            )
 
         if openai_request.stream:
             # Use streaming with AsyncWorkerPoolEngine
@@ -742,7 +762,9 @@ async def _handle_openai_completion(body_data: dict, request: Request):
 
             async def generate_stream():
                 try:
-                    async for chunk in scheduler.stream_async(messages=messages, options=options):
+                    async for chunk in scheduler.stream_async(
+                        messages=messages, options=options
+                    ):
                         if chunk is None:
                             continue
 
@@ -810,13 +832,17 @@ async def _handle_openai_completion(body_data: dict, request: Request):
 
             return StreamingResponse(generate_stream(), media_type="text/event-stream")
 
-        generation_response = await app.scheduler.generate_async(messages=messages, options=options)
+        generation_response = await app.scheduler.generate_async(
+            messages=messages, options=options
+        )
         response = await _openai_response(openai_request, generation_response)
         return response
 
     # log.info("Got OpenAI-compatible request for model %s", openai_request.model)
     for logger in registered_loggers:
-        asyncio.get_event_loop().create_task(logger({"endpoint": "/v1/chat/completions", "body": body_data}))
+        asyncio.get_event_loop().create_task(
+            logger({"endpoint": "/v1/chat/completions", "body": body_data})
+        )
 
     # Save the request headers in a context variable.
     api_request_headers.set(request.headers)
@@ -831,17 +857,25 @@ async def _handle_openai_completion(body_data: dict, request: Request):
     config_ids_to_check = await get_config_ids(rails_config_path)
 
     # Find first config with matching main model
-    config_id = await get_config_id_matching_main_llm(config_ids_to_check, openai_request.model, rails_config_path)
+    config_id = await get_config_id_matching_main_llm(
+        config_ids_to_check, openai_request.model, rails_config_path
+    )
 
     # Get the rails instance
     try:
         llm_rails = _get_rails([config_id])
     except ValueError as ex:
         log.exception(ex)
-        raise HTTPException(status_code=404, detail=f"Configuration '{config_id}' not found")
+        raise HTTPException(
+            status_code=404, detail=f"Configuration '{config_id}' not found"
+        )
 
     try:
-        if openai_request.stream and llm_rails.config.streaming_supported and llm_rails.main_llm_supports_streaming:
+        if (
+            openai_request.stream
+            and llm_rails.config.streaming_supported
+            and llm_rails.main_llm_supports_streaming
+        ):
             return await _handle_openai_streaming_completion(
                 openai_request=openai_request,
                 llm_rails=llm_rails,
@@ -865,7 +899,9 @@ async def _handle_openai_completion(body_data: dict, request: Request):
                 else:
                     content = str(res.response) if isinstance(res.response, str) else ""
             else:
-                content = str(res.get("content", "")) if isinstance(res, dict) else str(res)
+                content = (
+                    str(res.get("content", "")) if isinstance(res, dict) else str(res)
+                )
 
             # Extract token usage if available
             usage = None
@@ -873,9 +909,16 @@ async def _handle_openai_completion(body_data: dict, request: Request):
                 stats = getattr(res.log, "stats", None)
                 if stats is not None:
                     usage = OpenAIUsage(
-                        prompt_tokens=getattr(stats, "llm_calls_total_prompt_tokens", None) or 0,
-                        completion_tokens=getattr(stats, "llm_calls_total_completion_tokens", None) or 0,
-                        total_tokens=getattr(stats, "llm_calls_total_tokens", None) or 0,
+                        prompt_tokens=getattr(
+                            stats, "llm_calls_total_prompt_tokens", None
+                        )
+                        or 0,
+                        completion_tokens=getattr(
+                            stats, "llm_calls_total_completion_tokens", None
+                        )
+                        or 0,
+                        total_tokens=getattr(stats, "llm_calls_total_tokens", None)
+                        or 0,
                     )
 
             # Create OpenAI-compatible response
@@ -917,7 +960,9 @@ async def _openai_response(
         choices=[
             OpenAIChoice(
                 index=0,
-                message=OpenAIMessage(role="assistant", content=str(generation_response.response)),
+                message=OpenAIMessage(
+                    role="assistant", content=str(generation_response.response)
+                ),
                 finish_reason="stop",
             )
         ],
@@ -978,9 +1023,13 @@ async def get_config_id_matching_main_llm(
     """
     for candidate_config_id in config_ids_to_check:
         try:
-            candidate_config_path = os.path.join(rails_config_path, candidate_config_id, "config.yml")
+            candidate_config_path = os.path.join(
+                rails_config_path, candidate_config_id, "config.yml"
+            )
             if not os.path.exists(candidate_config_path):
-                candidate_config_path = os.path.join(rails_config_path, candidate_config_id, "config.yaml")
+                candidate_config_path = os.path.join(
+                    rails_config_path, candidate_config_id, "config.yaml"
+                )
 
             if os.path.exists(candidate_config_path):
                 with open(candidate_config_path, "r", encoding="utf-8") as f:
@@ -988,7 +1037,10 @@ async def get_config_id_matching_main_llm(
 
                 if "models" in config_data and isinstance(config_data["models"], list):
                     for model_config in config_data["models"]:
-                        if isinstance(model_config, dict) and model_config.get("type") == "main":
+                        if (
+                            isinstance(model_config, dict)
+                            and model_config.get("type") == "main"
+                        ):
                             if model_config.get("model") == model_or_config_id:
                                 return candidate_config_id
         except Exception:
@@ -1088,7 +1140,9 @@ async def _handle_guardrails_completion(body_data: dict, request: Request):
         if app.default_config_id:
             config_ids = [app.default_config_id]
         else:
-            raise GuardrailsConfigurationError("No request config_ids provided and server has no default configuration")
+            raise GuardrailsConfigurationError(
+                "No request config_ids provided and server has no default configuration"
+            )
 
     try:
         llm_rails = _get_rails(config_ids)
@@ -1135,7 +1189,11 @@ async def _handle_guardrails_completion(body_data: dict, request: Request):
             # And prepend them.
             messages = thread_messages + messages
 
-        if body.stream and llm_rails.config.streaming_supported and llm_rails.main_llm_supports_streaming:
+        if (
+            body.stream
+            and llm_rails.config.streaming_supported
+            and llm_rails.main_llm_supports_streaming
+        ):
             # Create the streaming handler instance
             streaming_handler = StreamingHandler()
 
@@ -1153,7 +1211,9 @@ async def _handle_guardrails_completion(body_data: dict, request: Request):
 
             return StreamingResponse(streaming_handler)
         else:
-            res = await llm_rails.generate_async(messages=messages, options=body.options, state=body.state)
+            res = await llm_rails.generate_async(
+                messages=messages, options=body.options, state=body.state
+            )
 
             if isinstance(res, GenerationResponse):
                 bot_message_content = res.response[0]
@@ -1184,7 +1244,9 @@ async def _handle_guardrails_completion(body_data: dict, request: Request):
 
     except Exception as ex:
         log.exception(ex)
-        return ResponseBody(messages=[{"role": "assistant", "content": "Internal server error."}])
+        return ResponseBody(
+            messages=[{"role": "assistant", "content": "Internal server error."}]
+        )
 
 
 # By default, there are no challenges
@@ -1236,7 +1298,9 @@ def start_auto_reload_monitoring():
                     return None
 
                 elif event.event_type == "created" or event.event_type == "modified":
-                    log.info(f"Watchdog received {event.event_type} event for file {event.src_path}")
+                    log.info(
+                        f"Watchdog received {event.event_type} event for file {event.src_path}"
+                    )
 
                     # Compute the relative path
                     src_path_str = str(event.src_path)
@@ -1260,7 +1324,9 @@ def start_auto_reload_monitoring():
                                 # We save the events history cache, to restore it on the new instance
                                 llm_rails_events_history_cache[config_id] = val
 
-                            log.info(f"Configuration {config_id} has changed. Clearing cache.")
+                            log.info(
+                                f"Configuration {config_id} has changed. Clearing cache."
+                            )
 
         observer = Observer()
         event_handler = Handler()
@@ -1275,7 +1341,9 @@ def start_auto_reload_monitoring():
 
     except ImportError:
         # Since this is running in a separate thread, we just print the error.
-        print("The auto-reload feature requires `watchdog`. Please install using `pip install watchdog`.")
+        print(
+            "The auto-reload feature requires `watchdog`. Please install using `pip install watchdog`."
+        )
         # Force close everything.
         os._exit(-1)
 
